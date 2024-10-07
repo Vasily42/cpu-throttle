@@ -1,0 +1,10 @@
+[Unit]
+Description=Sets optimal cpu frequency according to target temperature
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cpu-throttle at %i
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
