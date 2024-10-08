@@ -311,9 +311,7 @@ fn main() -> Result<(), i32> {
             }
         }
 
-        let new_dscrt_period = (MAX_DISCRT_PERIOD_MS as f64 * (1.0 - overall_restlessness))
-            .clamp(MIN_DISCRT_PERIOD_MS as f64, MAX_DISCRT_PERIOD_MS as f64)
-            as i32;
+        let new_dscrt_period = MIN_DISCRT_PERIOD_MS + (( MAX_DISCRT_PERIOD_MS - MIN_DISCRT_PERIOD_MS ) as f64 * (1.0 - overall_restlessness)) as i32;
 
         if overall_restlessness >= 0.9 {
             curr_freq -= delta_freq;
