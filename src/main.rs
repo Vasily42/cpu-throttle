@@ -72,34 +72,27 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
 
     temper_file_list.sort_by_key(|pair| pair.1);
 
-    temper_file_list
-        .last()
-        .expect("There are no hwmon files")
-        .0
-        .to_string()
+    temper_file_list.last().expect("There are no hwmon files").0.to_string()
 });
 
 static CPU_IDLENESS: LazyLock<std::sync::RwLock<Vec<u8>>> =
     LazyLock::new(|| std::sync::RwLock::new(vec![MAX_IDLENESS; *N_CPUS as usize]));
 
 static STANDART_MULTIPLIER: LazyLock<AtomicI32> = LazyLock::new(|| {
-    AtomicI32::new(
-        match std::fs::read_to_string("/var/lib/cpu-throttle/opt_multiplier_value") {
-            Ok(s) => s.trim().parse::<i32>().unwrap(),
-            Err(_) => 150,
-        },
-    )
+    AtomicI32::new(match std::fs::read_to_string("/var/lib/cpu-throttle/opt_multiplier_value") {
+        Ok(s) => s.trim().parse::<i32>().unwrap(),
+        Err(_) => 150,
+    })
 });
 
 static CLAMP_MIN_CPU_FREQ: LazyLock<i32> =
-    LazyLock::new(
-        || match std::fs::read_to_string("/var/lib/cpu-throttle/clamp_min_freq") {
-            Ok(s) => s.trim().parse::<i32>().unwrap(),
-            Err(_) => *MIN_CPU_FREQ,
-        },
-    );
+    LazyLock::new(|| match std::fs::read_to_string("/var/lib/cpu-throttle/clamp_min_freq") {
+        Ok(s) => s.trim().parse::<i32>().unwrap(),
+        Err(_) => *MIN_CPU_FREQ,
+    });
 
-static DISCRT_PERIOD_MS: LazyLock<AtomicI32> = LazyLock::new(|| AtomicI32::new(MIN_DISCRT_PERIOD_MS));
+static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
+    LazyLock::new(|| AtomicI32::new(MIN_DISCRT_PERIOD_MS));
 
 static MQUEUE: LazyLock<posixmq::PosixMq> = LazyLock::new(|| get_mqueue());
 
@@ -328,7 +321,9 @@ fn main() -> Result<(), i32> {
             }
         }
 
-        let new_dscrt_period = MIN_DISCRT_PERIOD_MS + (( MAX_DISCRT_PERIOD_MS - MIN_DISCRT_PERIOD_MS ) as f64 * (1.0 - overall_restlessness)) as i32;
+        let new_dscrt_period = MIN_DISCRT_PERIOD_MS
+            + ((MAX_DISCRT_PERIOD_MS - MIN_DISCRT_PERIOD_MS) as f64 * (1.0 - overall_restlessness))
+                as i32;
 
         if overall_restlessness >= 0.9 {
             curr_freq -= delta_freq;
@@ -371,9 +366,7 @@ fn get_mqueue() -> posixmq::PosixMq {
 }
 
 fn send_msg(msg: InterThreadMessage) {
-    MQUEUE
-        .send(0, msg.to_string().as_bytes())
-        .expect("Cannot send message");
+    MQUEUE.send(0, msg.to_string().as_bytes()).expect("Cannot send message");
 }
 
 fn receive_msg() -> Option<InterThreadMessage> {
@@ -390,10 +383,8 @@ fn receive_msg() -> Option<InterThreadMessage> {
 fn limit_freq_multiform(freq: i32) {
     let mut cpu_idleness = CPU_IDLENESS.write().unwrap();
     for i in 0..(*N_CPUS as usize) {
-        let curr_freq = read_i32(&format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-            i
-        ));
+        let curr_freq =
+            read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
 
         if curr_freq > *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
             cpu_idleness[i] = 0
@@ -608,33 +599,20 @@ fn optimize() {
     };
 
     let mut x_mul = [15i64, 50, 150];
-    let mut power = [
-        test(x_mul[0] as i32),
-        test(x_mul[1] as i32),
-        test(x_mul[2] as i32),
-    ];
+    let mut power = [test(x_mul[0] as i32), test(x_mul[1] as i32), test(x_mul[2] as i32)];
 
-    let min_x = x_mul[power
-        .iter()
-        .position(|x| *x == *power.iter().min().unwrap())
-        .unwrap()];
+    let min_x = x_mul[power.iter().position(|x| *x == *power.iter().min().unwrap()).unwrap()];
 
     let lower_x = (min_x / 2).clamp(1, i64::MAX);
     let upper_x = min_x * 3 / 2;
 
     x_mul = [lower_x, min_x, upper_x];
-    power = [
-        test(x_mul[0] as i32),
-        test(x_mul[1] as i32),
-        test(x_mul[2] as i32),
-    ];
+    power = [test(x_mul[0] as i32), test(x_mul[1] as i32), test(x_mul[2] as i32)];
     let (is_minimum, mut optimal_multiplier_64) = solve(x_mul, power);
 
     if !is_minimum || optimal_multiplier_64 <= 0 || optimal_multiplier_64 > i32::MAX as i64 {
-        optimal_multiplier_64 = x_mul[power
-            .iter()
-            .position(|x| *x == *power.iter().min().unwrap())
-            .unwrap()];
+        optimal_multiplier_64 =
+            x_mul[power.iter().position(|x| *x == *power.iter().min().unwrap()).unwrap()];
     }
 
     let optimal_multiplier = optimal_multiplier_64 as i32;
@@ -659,16 +637,12 @@ fn optimize() {
         return;
     }
 
-    std::fs::write(optimal_multiplier_file, optimal_multiplier.to_string()).expect(&format!(
-        "Cannot write to {}",
-        optimal_multiplier_file.to_string_lossy()
-    ));
+    std::fs::write(optimal_multiplier_file, optimal_multiplier.to_string())
+        .expect(&format!("Cannot write to {}", optimal_multiplier_file.to_string_lossy()));
 
     if clamp_found {
-        std::fs::write(clamp_min_freq_file, clamp_min_freq.to_string()).expect(&format!(
-            "Cannot write to {}",
-            clamp_min_freq_file.to_string_lossy()
-        ));
+        std::fs::write(clamp_min_freq_file, clamp_min_freq.to_string())
+            .expect(&format!("Cannot write to {}", clamp_min_freq_file.to_string_lossy()));
     }
 
     println!("Optimal values have been found!");
