@@ -197,12 +197,13 @@ struct PDController {
     target_t: i32,
     prev_t: i32,
     temp_velocity_err: f64,
+    temp_velocity_err_sum: f64,
     multiplier: i32,
 }
 
 impl PDController {
     fn new(target_t: i32, multiplier: i32) -> Self {
-        Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, multiplier }
+        Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, temp_velocity_err_sum: 0.0, multiplier }
     }
 
     fn get_delta_freq(&mut self, t: i32) -> i32 {
@@ -222,7 +223,10 @@ impl PDController {
 
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
 
-        let grad = self.multiplier as f64 * 1000.0 * self.temp_velocity_err;
+        self.temp_velocity_err_sum += self.temp_velocity_err;
+        self.temp_velocity_err_sum = self.temp_velocity_err_sum.clamp(-10.0, 10.0);
+
+        let grad = self.temp_velocity_err_sum.abs().clamp(1.0, 10.0) * 10000.0 * self.temp_velocity_err;
 
         grad as i32
     }
