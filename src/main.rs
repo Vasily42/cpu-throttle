@@ -22,10 +22,13 @@ extern crate mathru;
 extern crate nix;
 extern crate num_cpus;
 extern crate posixmq;
+extern crate serde;
+extern crate serde_json;
 extern crate text_io;
 
 use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
+use serde::{Deserialize, Serialize};
 use std::{
     fs::Permissions,
     i32,
@@ -42,11 +45,42 @@ use std::{
     },
 };
 
-const MAX_IDLENESS: u8 = 30;
-const MIN_DISCRT_PERIOD_MS: i32 = 150;
-const MAX_DISCRT_PERIOD_MS: i32 = 4000;
-const THROTTLING_START_TIME_MS: i32 = 7000;
-const THROTTLING_RELEASE_TIME_MS: i32 = 12000;
+const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
+const DEFAULT_MULTIPLIER: u16 = 100;
+const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
+const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
+const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
+const DEFAULT_THROTTLING_RELEASE_TIME_MS: u16 = 12000;
+const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+struct JsonConfig {
+    multiplier: u16,
+    min_freq: i32,
+    min_period_ms: u16,
+    max_period_ms: u16,
+    start_time_ms: u16,
+    release_time_ms: u16,
+    core_idleness_factor_ms: u16,
+    has_idle: bool,
+    multicore_limiter_allowed: bool,
+}
+
+impl Default for JsonConfig {
+    fn default() -> Self {
+        JsonConfig {
+            multiplier: DEFAULT_MULTIPLIER,
+            min_freq: *MIN_CPU_FREQ,
+            min_period_ms: DEFAULT_MIN_DISCRT_PERIOD_MS,
+            max_period_ms: DEFAULT_MAX_DISCRT_PERIOD_MS,
+            start_time_ms: DEFAULT_THROTTLING_START_TIME_MS,
+            release_time_ms: DEFAULT_THROTTLING_RELEASE_TIME_MS,
+            core_idleness_factor_ms: DEFAULT_CORE_IDLENESS_FACTOR_MS,
+            has_idle: true,
+            multicore_limiter_allowed: true,
+        }
+    }
+}
 
 static N_CPUS: LazyLock<i32> = LazyLock::new(|| num_cpus::get() as i32);
 
@@ -78,21 +112,8 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
 static CPU_IDLENESS: LazyLock<std::sync::RwLock<Vec<u8>>> =
     LazyLock::new(|| std::sync::RwLock::new(vec![MAX_IDLENESS; *N_CPUS as usize]));
 
-static STANDART_MULTIPLIER: LazyLock<AtomicI32> = LazyLock::new(|| {
-    AtomicI32::new(match std::fs::read_to_string("/var/lib/cpu-throttle/opt_multiplier_value") {
-        Ok(s) => s.trim().parse::<i32>().unwrap(),
-        Err(_) => 150,
-    })
-});
-
-static CLAMP_MIN_CPU_FREQ: LazyLock<i32> =
-    LazyLock::new(|| match std::fs::read_to_string("/var/lib/cpu-throttle/clamp_min_freq") {
-        Ok(s) => s.trim().parse::<i32>().unwrap(),
-        Err(_) => *MIN_CPU_FREQ,
-    });
-
 static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
-    LazyLock::new(|| AtomicI32::new(MIN_DISCRT_PERIOD_MS));
+    LazyLock::new(|| AtomicI32::new(read_config().unwrap_or_default().min_period_ms as i32));
 
 static MQUEUE: LazyLock<posixmq::PosixMq> = LazyLock::new(|| get_mqueue());
 
@@ -436,6 +457,31 @@ fn read_i32(path: &str) -> i32 {
     value
 }
 
+fn read_config() -> Result<JsonConfig, std::io::Error> {
+    let bytes_json = std::fs::read(CONFIG_PATH)?;
+    Ok(serde_json::from_str(from_utf8(&bytes_json).unwrap()).expect("json parse error"))
+}
+
+fn write_config(config: JsonConfig) -> Result<(), ()> {
+    let config_path = Path::new(CONFIG_PATH);
+    if !config_path.exists() {
+        if !is_superuser::is_superuser() {
+            return Err(());
+        }
+        let parent_dir = config_path.parent().unwrap();
+        if !parent_dir.exists() {
+            std::fs::DirBuilder::new()
+                .create(parent_dir)
+                .expect("failed creating parent dir in /etc");
+        }
+        std::fs::File::create(config_path).expect("Cannot create config.json");
+        std::fs::set_permissions(config_path, Permissions::from_mode(0o666))
+            .expect("Cannot set permissions on config.json");
+    }
+    std::fs::write(config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    Ok(())
+}
+
 fn already_run() -> bool {
     let mut pgrep = Command::new("pgrep");
     pgrep.arg("cpu-throttle");
@@ -454,23 +500,20 @@ fn optimize() {
         return;
     }
 
-    let optimal_multiplier_file = Path::new("/var/lib/cpu-throttle/opt_multiplier_value");
-    let clamp_min_freq_file = Path::new("/var/lib/cpu-throttle/clamp_min_freq");
-    if !optimal_multiplier_file.exists() {
-        let parent_dir = optimal_multiplier_file.parent().unwrap();
-        if !parent_dir.exists() {
-            std::fs::DirBuilder::new()
-                .create(parent_dir)
-                .expect("failed creating parent dir in /var");
+    let config = match read_config() {
+        Ok(config) => {
+            if config.multiplier != DEFAULT_MULTIPLIER || config.min_freq != *MIN_CPU_FREQ {
+                print!("Optimal values were previosly established. Continue anyway? [Y/n]: ");
+                let input: String = text_io::read!("{}\n");
+                if !input.is_empty() && !input.to_ascii_lowercase().starts_with('y') {
+                    println!("Ok, goodbye ;)");
+                    return;
+                }
+            }
+            config
         }
-    } else {
-        print!("Optimal values were previosly established. Continue anyway? [Y/n]: ");
-        let input: String = text_io::read!("{}\n");
-        if !input.is_empty() && !input.to_ascii_lowercase().starts_with('y') {
-            println!("Ok, goodbye ;)");
-            return;
-        }
-    }
+        Err(_) => panic!(),
+    };
 
     print!("Enter the maximum CPU temperature you consider acceptable [85]: ");
     let target_t = 1000
@@ -637,13 +680,10 @@ fn optimize() {
         return;
     }
 
-    std::fs::write(optimal_multiplier_file, optimal_multiplier.to_string())
-        .expect(&format!("Cannot write to {}", optimal_multiplier_file.to_string_lossy()));
+    let new_config =
+        JsonConfig { multiplier: optimal_multiplier as u16, min_freq: clamp_min_freq, ..config };
 
-    if clamp_found {
-        std::fs::write(clamp_min_freq_file, clamp_min_freq.to_string())
-            .expect(&format!("Cannot write to {}", clamp_min_freq_file.to_string_lossy()));
-    }
+    write_config(new_config).expect("idk");
 
     println!("Optimal values have been found!");
 }
