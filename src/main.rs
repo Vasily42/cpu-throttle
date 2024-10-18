@@ -30,6 +30,7 @@ use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::min,
     fs::Permissions,
     i32,
     os::unix::fs::PermissionsExt,
@@ -41,7 +42,7 @@ use std::{
             AtomicBool, AtomicI32,
             Ordering::{self, *},
         },
-        Arc, LazyLock,
+        Arc, LazyLock, Mutex,
     },
 };
 
@@ -353,9 +354,17 @@ struct Args {
 }
 
 fn main() -> Result<(), i32> {
+    if Path::new("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies")
+        .try_exists()
+        .unwrap()
+    {
+        eprintln!("The CPU probably doesn't support fine-grained frequency scaling");
+        return Err(1);
+    }
+
     let args = Args::parse();
 
-    if already_run() {
+    let target_temperature: i32 = if already_run() {
         use InterThreadMessage::*;
         match args.command {
             InterThreadMessage::Optimize => {
@@ -374,26 +383,35 @@ fn main() -> Result<(), i32> {
         };
 
         return Ok(());
-    }
-
-    if Path::new("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies")
-        .try_exists()
-        .unwrap()
-    {
-        eprintln!("The CPU probably doesn't support fine-grained frequency scaling");
-        return Err(1);
-    }
-
-    let target_temperature = match args.command {
-        InterThreadMessage::At(temperature) => temperature.temperature,
-        _ => {
-            eprintln!("You must enter temperature");
-            return Err(1);
+    } else {
+        use InterThreadMessage::*;
+        match args.command {
+            InterThreadMessage::Optimize => {
+                if !is_superuser::is_superuser() {
+                    eprintln!("Run this command [optimize] with sudo!");
+                    return Err(1);
+                }
+                optimize();
+                return Ok(());
+            }
+            At(arg) => arg.temperature,
+            _ => {
+                eprintln!(
+                    "Daemon has not been started. Start it with \'cpu-throttle at <temperature>\'"
+                );
+                return Err(1);
+            }
         }
     };
 
-    let target_t = Arc::new(AtomicI32::new(target_temperature * 1000));
+    let target_t = target_temperature * 1000;
 
+    let mut config = match read_config() {
+        Ok(config) => config,
+        Err(_) => {
+            let default_config = JsonConfig::default();
+            write_config(default_config).expect("Cannot write config");
+            default_config
         }
     };
 
@@ -591,10 +609,9 @@ fn optimize() {
             }
         };
 
-    let mut freq_ctl = FrequencyController::new(target_t);
-    let optimal_freq: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));
+    let optimal_freqs: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut test = |multiplier: i32| -> i64 {
+    let test = |multiplier: i32| -> i64 {
         let stress_task = |sec: i32, load: f64| {
             let ld_cpus = ((*N_CPUS as f64 * load) as i32).clamp(1, *N_CPUS);
             let mut command = Command::new("timeout");
