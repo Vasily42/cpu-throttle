@@ -117,21 +117,16 @@ static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
 
 static MQUEUE: LazyLock<posixmq::PosixMq> = LazyLock::new(|| get_mqueue());
 
-struct FrequencyController {
+struct PDController {
     target_t: i32,
     prev_t: i32,
     temp_velocity_err: f64,
-    grad_multiplier: i32,
+    multiplier: i32,
 }
 
-impl FrequencyController {
-    fn new(target_temperature: i32) -> Self {
-        Self {
-            target_t: target_temperature,
-            prev_t: get_temp(),
-            temp_velocity_err: 0.0,
-            grad_multiplier: STANDART_MULTIPLIER.load(Relaxed),
-        }
+impl PDController {
+    fn new(target_t: i32, multiplier: i32) -> Self {
+        Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, multiplier }
     }
 
     fn get_delta_freq(&mut self, t: i32) -> i32 {
@@ -151,7 +146,7 @@ impl FrequencyController {
 
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
 
-        let grad = self.grad_multiplier as f64 * 1000.0 * self.temp_velocity_err;
+        let grad = self.multiplier as f64 * 1000.0 * self.temp_velocity_err;
 
         grad as i32
     }
