@@ -82,6 +82,84 @@ impl Default for JsonConfig {
     }
 }
 
+struct ThrottlingAlgo {
+    config: JsonConfig,
+    pd_ctl: PDController,
+    limiter: Box<dyn FrequencyLimiter>,
+    overall_restlessness: f64,
+    curr_freq: i32,
+}
+
+impl ThrottlingAlgo {
+    fn new(target_t: i32, config: JsonConfig) -> Self {
+        let pd = PDController::new(target_t, config.multiplier as i32);
+        let limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
+            match *N_CPUS {
+                1 => Box::new(UniformFrequencyLimiter),
+                2.. => Box::new(MulticoreFrequencyLimiter::new(config.core_idleness_factor_ms)),
+                _ => {
+                    eprintln!("wtf");
+                    panic!()
+                }
+            }
+        } else {
+            Box::new(UniformFrequencyLimiter)
+        };
+        Self { config, pd_ctl: pd, limiter, overall_restlessness: 0.0, curr_freq: *MAX_CPU_FREQ }
+    }
+
+    fn step(&mut self) -> i32 {
+        let actual_t = get_temp();
+        let delta_freq = self.pd_ctl.get_delta_freq(actual_t);
+        let new_dscrt_period;
+
+        if self.config.has_idle {
+            if delta_freq > 0 && actual_t > self.pd_ctl.target_t - 5000
+                || self.curr_freq != *MAX_CPU_FREQ
+            {
+                self.overall_restlessness +=
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.start_time_ms as f64;
+                if self.overall_restlessness > 1.0 {
+                    self.overall_restlessness = 1.0;
+                }
+            } else if self.curr_freq == *MAX_CPU_FREQ {
+                self.overall_restlessness -=
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_time_ms as f64;
+                if self.overall_restlessness < 0.0 {
+                    self.overall_restlessness = 0.0;
+                }
+            }
+
+            if self.overall_restlessness >= 0.9 {
+                self.curr_freq -= delta_freq;
+                self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
+
+                self.limiter.limit_freq(self.curr_freq);
+            } else {
+                if self.curr_freq != *MAX_CPU_FREQ {
+                    self.curr_freq = *MAX_CPU_FREQ;
+                    fast_unlock();
+                }
+                self.pd_ctl.prev_t = actual_t;
+            }
+
+            new_dscrt_period = self.config.min_period_ms as i32
+                + ((self.config.max_period_ms - self.config.min_period_ms) as f64
+                    * (1.0 - self.overall_restlessness)) as i32;
+        } else {
+            if self.curr_freq < *MAX_CPU_FREQ || delta_freq > 0 {
+                self.curr_freq -= delta_freq;
+                self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
+
+                self.limiter.limit_freq(self.curr_freq);
+            }
+            new_dscrt_period = self.config.min_period_ms as i32;
+        }
+
+        new_dscrt_period
+    }
+}
+
 static N_CPUS: LazyLock<i32> = LazyLock::new(|| num_cpus::get() as i32);
 
 static MAX_CPU_FREQ: LazyLock<i32> =
@@ -329,11 +407,9 @@ fn main() -> Result<(), i32> {
     })
     .expect("Error setting SIGTERM handler");
 
-    let mut freq_ctl = FrequencyController::new(target_t.load(Relaxed));
-    let mut curr_freq: i32 = *MAX_CPU_FREQ;
+    let mut algo = ThrottlingAlgo::new(target_t, config);
+
     let mut paused = false;
-    let mut overall_restlessness: f64 = 0.0;
-    let mut clamp_min_cpu_freq = *CLAMP_MIN_CPU_FREQ;
 
     while throttling.load(Acquire) {
         std::thread::sleep(Duration::from_millis(DISCRT_PERIOD_MS.load(Relaxed) as u64));
@@ -347,19 +423,18 @@ fn main() -> Result<(), i32> {
                         paused = false;
                     } else if !paused && (msg == Toggle || msg == Pause) {
                         fast_unlock();
-                        curr_freq = *MAX_CPU_FREQ;
-                        overall_restlessness = 0.0;
-                        DISCRT_PERIOD_MS.store(MAX_DISCRT_PERIOD_MS, Ordering::Relaxed);
+                        algo.curr_freq = *MAX_CPU_FREQ;
+                        algo.overall_restlessness = 0.0;
+                        DISCRT_PERIOD_MS.store(config.max_period_ms as i32, Ordering::Relaxed);
                         paused = true;
                     }
                 }
                 ReadConfig => {
-                    freq_ctl.grad_multiplier =
-                        read_i32("/var/lib/cpu-throttle/opt_multiplier_value");
-                    clamp_min_cpu_freq = read_i32("/var/lib/cpu-throttle/clamp_min_freq");
+                    config = read_config().unwrap();
+                    algo = ThrottlingAlgo::new(target_t, config);
                 }
                 At(temperature) => {
-                    freq_ctl.target_t = temperature.temperature * 1000;
+                    algo.pd_ctl.target_t = temperature.temperature * 1000;
                 }
                 Exit => {
                     break;
@@ -372,40 +447,7 @@ fn main() -> Result<(), i32> {
             continue;
         }
 
-        let actual_t = get_temp();
-        let delta_freq = freq_ctl.get_delta_freq(actual_t);
-
-        if delta_freq > 0 && actual_t > target_t.load(Relaxed) - 5000 || curr_freq != *MAX_CPU_FREQ
-        {
-            overall_restlessness +=
-                DISCRT_PERIOD_MS.load(Relaxed) as f64 / THROTTLING_START_TIME_MS as f64;
-            if overall_restlessness > 1.0 {
-                overall_restlessness = 1.0;
-            }
-        } else if curr_freq == *MAX_CPU_FREQ {
-            overall_restlessness -=
-                DISCRT_PERIOD_MS.load(Relaxed) as f64 / THROTTLING_RELEASE_TIME_MS as f64;
-            if overall_restlessness < 0.0 {
-                overall_restlessness = 0.0;
-            }
-        }
-
-        let new_dscrt_period = MIN_DISCRT_PERIOD_MS
-            + ((MAX_DISCRT_PERIOD_MS - MIN_DISCRT_PERIOD_MS) as f64 * (1.0 - overall_restlessness))
-                as i32;
-
-        if overall_restlessness >= 0.9 {
-            curr_freq -= delta_freq;
-            curr_freq = curr_freq.clamp(clamp_min_cpu_freq, *MAX_CPU_FREQ);
-
-            limit_freq(curr_freq);
-        } else {
-            if curr_freq != *MAX_CPU_FREQ {
-                curr_freq = *MAX_CPU_FREQ;
-                fast_unlock();
-            }
-            freq_ctl.prev_t = actual_t;
-        }
+        let new_dscrt_period = algo.step();
 
         DISCRT_PERIOD_MS.store(new_dscrt_period, Ordering::Relaxed);
     }
@@ -562,11 +604,19 @@ fn optimize() {
         println!("Warming up...");
         stress_task(15, 1.0);
 
-        freq_ctl.grad_multiplier = multiplier;
+        let mut algo = ThrottlingAlgo::new(
+            target_t,
+            JsonConfig {
+                has_idle: false,
+                multicore_limiter_allowed: false,
+                min_freq: *MIN_CPU_FREQ,
+                ..config
+            },
+        );
+
+        algo.pd_ctl.multiplier = multiplier;
 
         let mut temperature_velocity_deviation_power = 0i64;
-
-        let mut curr_freq = *MAX_CPU_FREQ;
 
         println!("testing with {} multiplier...", multiplier);
 
@@ -586,32 +636,16 @@ fn optimize() {
             stress_task(1, 1.0);
         });
 
-        for _ in 0..(20000 / MIN_DISCRT_PERIOD_MS) {
-            let actual_t = get_temp();
-
-            curr_freq -= freq_ctl.get_delta_freq(actual_t);
-            curr_freq = curr_freq.clamp(*MIN_CPU_FREQ, *MAX_CPU_FREQ);
-
-            temperature_velocity_deviation_power += freq_ctl.temp_velocity_err.abs() as i64;
-
-            if freq_ctl.temp_velocity_err.abs() < 0.5 && (actual_t - target_t).abs() < 1000 {
-                if optimal_freq.load(Relaxed) == 0 {
-                    optimal_freq.store(curr_freq, Relaxed);
-                } else {
-                    let weight = 2.0 * (0.5 - freq_ctl.temp_velocity_err.abs());
-                    let soft_weight = 0.95 * weight;
-                    optimal_freq.store(
-                        (soft_weight * curr_freq as f64
-                            + (1.0 - soft_weight) * optimal_freq.load(Relaxed) as f64)
-                            as i32,
-                        Relaxed,
-                    );
-                }
+        for _ in 0..(20000 / config.min_period_ms) {
+            if algo.pd_ctl.temp_velocity_err.abs() < 0.5 && (get_temp() - target_t).abs() < 1000 {
+                optimal_freqs.lock().unwrap().push(algo.curr_freq);
             }
 
-            limit_freq_uniform(curr_freq);
+            algo.step();
 
-            std::thread::sleep(Duration::from_millis(MIN_DISCRT_PERIOD_MS as u64));
+            temperature_velocity_deviation_power += algo.pd_ctl.temp_velocity_err.abs() as i64;
+
+            std::thread::sleep(Duration::from_millis(config.min_period_ms as u64));
         }
 
         fast_unlock();
@@ -619,8 +653,6 @@ fn optimize() {
         complex_stress_task.join().expect("what");
 
         println!("deviation is {}", temperature_velocity_deviation_power);
-
-        println!("optimal_freq: {}", optimal_freq.load(Relaxed));
 
         temperature_velocity_deviation_power
     };
@@ -672,15 +704,22 @@ fn optimize() {
 
     println!("optimal multiplier is {}", optimal_multiplier);
 
-    let clamp_min_freq = (0.7 * (optimal_freq.load(Relaxed) - *MIN_CPU_FREQ) as f64) as i32;
+    let mut clamp_min_freq = *MIN_CPU_FREQ;
 
-    let clamp_found: bool;
-    if clamp_min_freq <= 0 || clamp_min_freq == *MIN_CPU_FREQ {
+    let opt_freq_guard = optimal_freqs.lock().unwrap();
+    let len = opt_freq_guard.len();
+
+    if len == 0 {
         println!("Optimal minimum clamp cpu frequency not found :(");
-        clamp_found = false;
     } else {
+        if len % 2 == 1 {
+            clamp_min_freq = opt_freq_guard[len / 2];
+        } else {
+            clamp_min_freq = (opt_freq_guard[len / 2] + opt_freq_guard[len / 2 - 1]) / 2;
+        }
+        clamp_min_freq = min(clamp_min_freq, opt_freq_guard.iter().sum::<i32>() / len as i32);
+        clamp_min_freq = *MIN_CPU_FREQ + (clamp_min_freq - *MIN_CPU_FREQ) / 2;
         println!("Optimal minimum clamp cpu frequency is {}", clamp_min_freq);
-        clamp_found = true;
     }
 
     println!("Do you want to set new default values? [Y/n]: ");
