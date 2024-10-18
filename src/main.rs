@@ -109,9 +109,6 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
     temper_file_list.last().expect("There are no hwmon files").0.to_string()
 });
 
-static CPU_IDLENESS: LazyLock<std::sync::RwLock<Vec<u8>>> =
-    LazyLock::new(|| std::sync::RwLock::new(vec![MAX_IDLENESS; *N_CPUS as usize]));
-
 static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
     LazyLock::new(|| AtomicI32::new(read_config().unwrap_or_default().min_period_ms as i32));
 
@@ -149,6 +146,68 @@ impl PDController {
         let grad = self.multiplier as f64 * 1000.0 * self.temp_velocity_err;
 
         grad as i32
+    }
+}
+
+trait FrequencyLimiter {
+    fn limit_freq(&mut self, freq: i32);
+}
+
+struct UniformFrequencyLimiter;
+
+impl FrequencyLimiter for UniformFrequencyLimiter {
+    fn limit_freq(&mut self, freq: i32) {
+        for i in 0..*N_CPUS {
+            std::fs::write(
+                format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
+                freq.to_string(),
+            )
+            .expect("Cannot write to /sys");
+        }
+    }
+}
+
+struct MulticoreFrequencyLimiter {
+    cpu_idleness: Vec<u16>,
+    core_idleness_factor_ms: u16,
+}
+
+impl MulticoreFrequencyLimiter {
+    fn new(core_idleness_factor_ms: u16) -> Self {
+        MulticoreFrequencyLimiter {
+            cpu_idleness: vec![core_idleness_factor_ms; *N_CPUS as usize],
+            core_idleness_factor_ms,
+        }
+    }
+}
+
+impl FrequencyLimiter for MulticoreFrequencyLimiter {
+    fn limit_freq(&mut self, freq: i32) {
+        for i in 0..(*N_CPUS as usize) {
+            let curr_freq =
+                read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
+
+            if curr_freq > *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
+                self.cpu_idleness[i] = 0
+            } else if curr_freq < *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.2) as i32 {
+                self.cpu_idleness[i] += DISCRT_PERIOD_MS.load(Relaxed) as u16;
+                self.cpu_idleness[i] = self.cpu_idleness[i].clamp(0, self.core_idleness_factor_ms);
+            }
+
+            if self.cpu_idleness[i] >= self.core_idleness_factor_ms {
+                std::fs::write(
+                    format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
+                    (*MAX_CPU_FREQ).to_string(),
+                )
+                .expect("Cannot write to /sys");
+            } else {
+                std::fs::write(
+                    format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
+                    freq.to_string(),
+                )
+                .expect("Cannot write to /sys");
+            }
+        }
     }
 }
 
@@ -257,12 +316,6 @@ fn main() -> Result<(), i32> {
 
     let target_t = Arc::new(AtomicI32::new(target_temperature * 1000));
 
-    let limit_freq = match *N_CPUS {
-        1 => limit_freq_uniform,
-        2.. => limit_freq_multiform,
-        ..=0 => {
-            eprintln!("wtf");
-            return Err(1);
         }
     };
 
@@ -396,47 +449,9 @@ fn receive_msg() -> Option<InterThreadMessage> {
     }
 }
 
-fn limit_freq_multiform(freq: i32) {
-    let mut cpu_idleness = CPU_IDLENESS.write().unwrap();
-    for i in 0..(*N_CPUS as usize) {
-        let curr_freq =
-            read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
-
-        if curr_freq > *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
-            cpu_idleness[i] = 0
-        } else if curr_freq < *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.2) as i32 {
-            cpu_idleness[i] += 1;
-            cpu_idleness[i] = cpu_idleness[i].clamp(0, MAX_IDLENESS);
-        }
-
-        if cpu_idleness[i] >= MAX_IDLENESS - 2 {
-            std::fs::write(
-                format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                (*MAX_CPU_FREQ).to_string(),
-            )
-            .expect("Cannot write to /sys");
-        } else {
-            std::fs::write(
-                format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                freq.to_string(),
-            )
-            .expect("Cannot write to /sys");
-        }
-    }
-}
-
-fn limit_freq_uniform(freq: i32) {
-    for i in 0..*N_CPUS {
-        std::fs::write(
-            format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-            freq.to_string(),
-        )
-        .expect("Cannot write to /sys");
-    }
-}
-
 fn fast_unlock() {
-    limit_freq_uniform(*MAX_CPU_FREQ);
+    let mut ctl = UniformFrequencyLimiter;
+    ctl.limit_freq(*MAX_CPU_FREQ);
 }
 
 fn get_temp() -> i32 {
