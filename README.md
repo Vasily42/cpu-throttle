@@ -11,6 +11,9 @@ git clone https://github.com/Vasily42/cpu-throttle
 cd cpu-throttle
 cargo build --release
 ```
+
+Note: only tags are considered usable, so you may need to checkout latest tag.
+
 Then link or copy binary (to /usr/local/bin/) or use cargo --install
 
 Also you can link/copy .service to /etc/systemd/system/ and enable unit:
@@ -51,6 +54,7 @@ As an additional measure to maintain interactivity, the lower minimum frequency 
 Also, on multi-core systems, the frequency will be limited only on cores that cause long term load (to preserve interactivity)
 
 It is also important to understand that the program does not recognize high load on gpu, so frequency limitation in this case may be excessive, but the solution to this can only be a temporary shutdown of the daemon (e.g. with cpu-throttle pause).
+
 
 
 
