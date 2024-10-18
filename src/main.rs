@@ -139,7 +139,7 @@ impl ThrottlingAlgo {
             } else {
                 if self.curr_freq != *MAX_CPU_FREQ {
                     self.curr_freq = *MAX_CPU_FREQ;
-                    fast_unlock();
+                    self.limiter.limit_freq(*MAX_CPU_FREQ);
                 }
                 self.pd_ctl.prev_t = actual_t;
             }
@@ -415,8 +415,6 @@ fn main() -> Result<(), i32> {
         }
     };
 
-    fast_unlock();
-
     let throttling = Arc::new(AtomicBool::new(true));
     let t_wait_term = throttling.clone();
 
@@ -440,7 +438,7 @@ fn main() -> Result<(), i32> {
                     if paused && (msg == Toggle || msg == Continue) {
                         paused = false;
                     } else if !paused && (msg == Toggle || msg == Pause) {
-                        fast_unlock();
+                        algo.limiter.limit_freq(*MAX_CPU_FREQ);
                         algo.curr_freq = *MAX_CPU_FREQ;
                         algo.overall_restlessness = 0.0;
                         DISCRT_PERIOD_MS.store(config.max_period_ms as i32, Ordering::Relaxed);
@@ -471,7 +469,7 @@ fn main() -> Result<(), i32> {
     }
 
     println!("exiting...");
-    fast_unlock();
+    
 
     posixmq::remove_queue("/cpu-throttle").expect("Cannot close message queue");
     Ok(())
@@ -507,11 +505,6 @@ fn receive_msg() -> Option<InterThreadMessage> {
         Ok(_) => Some(from_utf8(&msg_buffer).unwrap().parse().unwrap()),
         Err(_) => None,
     }
-}
-
-fn fast_unlock() {
-    let mut ctl = UniformFrequencyLimiter;
-    ctl.limit_freq(*MAX_CPU_FREQ);
 }
 
 fn get_temp() -> i32 {
@@ -637,6 +630,8 @@ fn optimize() {
 
         println!("testing with {} multiplier...", multiplier);
 
+        algo.limiter.limit_freq(*MAX_CPU_FREQ);
+
         let complex_stress_task = std::thread::spawn(move || {
             stress_task(5, 1.0);
             stress_task(3, 0.2);
@@ -665,7 +660,7 @@ fn optimize() {
             std::thread::sleep(Duration::from_millis(config.min_period_ms as u64));
         }
 
-        fast_unlock();
+        algo.limiter.limit_freq(*MAX_CPU_FREQ);
 
         complex_stress_task.join().expect("what");
 
@@ -673,8 +668,6 @@ fn optimize() {
 
         temperature_velocity_deviation_power
     };
-
-    fast_unlock();
 
     let solve = |x_arr: [i64; 3], y_arr: [i64; 3]| -> (bool, i64) {
         use mathru::algebra::linear::matrix::{General, Solve};
