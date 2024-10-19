@@ -132,7 +132,7 @@ impl ThrottlingAlgo {
             }
 
             if self.overall_restlessness >= 0.9 {
-                self.curr_freq -= delta_freq;
+                self.curr_freq -= delta_freq.max(*MAX_STEP_DOWN);
                 self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
 
                 self.limiter.limit_freq(self.curr_freq);
@@ -149,7 +149,7 @@ impl ThrottlingAlgo {
                     * (1.0 - self.overall_restlessness)) as i32;
         } else {
             if self.curr_freq < *MAX_CPU_FREQ || delta_freq > 0 {
-                self.curr_freq -= delta_freq;
+                self.curr_freq -= delta_freq.max(*MAX_STEP_DOWN);
                 self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
 
                 self.limiter.limit_freq(self.curr_freq);
@@ -168,6 +168,9 @@ static MAX_CPU_FREQ: LazyLock<i32> =
 
 static MIN_CPU_FREQ: LazyLock<i32> =
     LazyLock::new(|| read_i32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"));
+
+static MAX_STEP_DOWN: LazyLock<i32> =
+    LazyLock::new(|| -(*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10);
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
     let mut find_cmd_output = Command::new("find")
