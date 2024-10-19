@@ -275,7 +275,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
                 self.cpu_idleness[i] = 0
             } else if curr_freq < *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.2) as i32 {
                 self.cpu_idleness[i] += DISCRT_PERIOD_MS.load(Relaxed) as u16;
-                self.cpu_idleness[i] = self.cpu_idleness[i].clamp(0, self.core_idleness_factor_ms);
+                self.cpu_idleness[i] = self.cpu_idleness[i].min(self.core_idleness_factor_ms);
             }
 
             if self.cpu_idleness[i] >= self.core_idleness_factor_ms {
