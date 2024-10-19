@@ -18,13 +18,11 @@
 extern crate clap;
 extern crate ctrlc;
 extern crate is_superuser;
-extern crate mathru;
 extern crate nix;
 extern crate num_cpus;
 extern crate posixmq;
 extern crate serde;
 extern crate serde_json;
-extern crate text_io;
 
 use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
