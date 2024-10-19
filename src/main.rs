@@ -30,7 +30,6 @@ use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp::min,
     fs::Permissions,
     i32,
     os::unix::fs::PermissionsExt,
@@ -42,7 +41,7 @@ use std::{
             AtomicBool, AtomicI32,
             Ordering::{self, *},
         },
-        Arc, LazyLock, Mutex,
+        Arc, LazyLock
     },
 };
 
