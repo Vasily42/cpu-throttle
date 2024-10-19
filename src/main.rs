@@ -300,8 +300,6 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
 
 #[derive(Subcommand, PartialEq, Clone, Copy)]
 enum InterThreadMessage {
-    /// Try to find better hyperparameters (highly recommended)
-    Optimize,
     /// Pause throttling
     Pause,
     /// Continue throttling
@@ -319,7 +317,6 @@ enum InterThreadMessage {
 impl ToString for InterThreadMessage {
     fn to_string(&self) -> String {
         match self {
-            InterThreadMessage::Optimize => String::from("optimize"),
             InterThreadMessage::Pause => String::from("pause"),
             InterThreadMessage::Continue => String::from("continue"),
             InterThreadMessage::Toggle => String::from("toggle"),
@@ -335,7 +332,6 @@ impl FromStr for InterThreadMessage {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim_end_matches('\0').to_lowercase().as_str() {
-            "optimize" => Ok(InterThreadMessage::Optimize),
             "pause" => Ok(InterThreadMessage::Pause),
             "continue" => Ok(InterThreadMessage::Continue),
             "toggle" => Ok(InterThreadMessage::Toggle),
@@ -373,35 +369,12 @@ fn main() -> Result<(), i32> {
     let args = Args::parse();
 
     let target_temperature: i32 = if already_run() {
-        use InterThreadMessage::*;
-        match args.command {
-            InterThreadMessage::Optimize => {
-                if !is_superuser::is_superuser() {
-                    eprintln!("Run this command [optimize] with sudo!");
-                    return Err(1);
-                }
-                send_msg(Pause);
-                optimize();
-                send_msg(ReadConfig);
-                send_msg(Continue);
-            }
-            _ => {
-                send_msg(args.command);
-            }
-        };
+        send_msg(args.command);
 
         return Ok(());
     } else {
         use InterThreadMessage::*;
         match args.command {
-            InterThreadMessage::Optimize => {
-                if !is_superuser::is_superuser() {
-                    eprintln!("Run this command [optimize] with sudo!");
-                    return Err(1);
-                }
-                optimize();
-                return Ok(());
-            }
             At(arg) => arg.temperature,
             _ => {
                 eprintln!(
@@ -463,7 +436,6 @@ fn main() -> Result<(), i32> {
                 Exit => {
                     break;
                 }
-                _ => {}
             }
         }
 
@@ -477,7 +449,6 @@ fn main() -> Result<(), i32> {
     }
 
     println!("exiting...");
-    
 
     posixmq::remove_queue("/cpu-throttle").expect("Cannot close message queue");
     Ok(())
@@ -561,196 +532,4 @@ fn already_run() -> bool {
     let lines: Vec<&str> = output_str.split('\n').collect();
 
     lines.len() > 2
-}
-
-fn optimize() {
-    print!("Do you really want to find optimal hyperparameters (some of them)? [Y/n]: ");
-    let input: String = text_io::read!("{}\n");
-    if !input.is_empty() && !input.to_ascii_lowercase().starts_with('y') {
-        println!("Ok, goodbye :)");
-        return;
-    }
-
-    let config = match read_config() {
-        Ok(config) => {
-            if config.multiplier != DEFAULT_MULTIPLIER || config.min_freq != *MIN_CPU_FREQ {
-                print!("Optimal values were previosly established. Continue anyway? [Y/n]: ");
-                let input: String = text_io::read!("{}\n");
-                if !input.is_empty() && !input.to_ascii_lowercase().starts_with('y') {
-                    println!("Ok, goodbye ;)");
-                    return;
-                }
-            }
-            config
-        }
-        Err(_) => panic!(),
-    };
-
-    print!("Enter the maximum CPU temperature you consider acceptable [85]: ");
-    let target_t = 1000
-        * loop {
-            let input: String = text_io::read!("{}\n");
-            if input.is_empty() {
-                break 85;
-            } else {
-                match input.trim().parse() {
-                    Ok(t) => {
-                        if t > 120 || t < 20 {
-                            print!("Temperature must be between 20 and 120 (Celsius) [85]: ");
-                            continue;
-                        } else {
-                            break t;
-                        }
-                    }
-                    Err(_) => {
-                        print!("You need to enter an integer value between 20 and 120 [85]: ");
-                        continue;
-                    }
-                }
-            }
-        };
-
-    let optimal_freqs: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let test = |multiplier: i32| -> i64 {
-        let stress_task = |sec: i32, load: f64| {
-            let ld_cpus = ((*N_CPUS as f64 * load) as i32).clamp(1, *N_CPUS);
-            let mut command = Command::new("timeout");
-            command.args([&format!("{}s", sec), "stress", "-c", &ld_cpus.to_string()]);
-            command.status().expect("Cannot execute stress command");
-        };
-        println!("Warming up...");
-        stress_task(15, 1.0);
-
-        let mut algo = ThrottlingAlgo::new(
-            target_t,
-            JsonConfig {
-                has_idle: false,
-                multicore_limiter_allowed: false,
-                min_freq: *MIN_CPU_FREQ,
-                ..config
-            },
-        );
-
-        algo.pd_ctl.multiplier = multiplier;
-
-        let mut temperature_velocity_deviation_power = 0i64;
-
-        println!("testing with {} multiplier...", multiplier);
-
-        algo.limiter.limit_freq(*MAX_CPU_FREQ);
-
-        let complex_stress_task = std::thread::spawn(move || {
-            stress_task(5, 1.0);
-            stress_task(3, 0.2);
-            std::thread::sleep(Duration::from_secs(2));
-            stress_task(1, 1.0);
-            stress_task(1, 0.3);
-            stress_task(1, 1.0);
-            stress_task(1, 0.4);
-            std::thread::sleep(Duration::from_secs(1));
-            stress_task(1, 1.0);
-            std::thread::sleep(Duration::from_secs(1));
-            stress_task(1, 1.0);
-            std::thread::sleep(Duration::from_secs(1));
-            stress_task(1, 1.0);
-        });
-
-        for _ in 0..(20000 / config.min_period_ms) {
-            if algo.pd_ctl.temp_velocity_err.abs() < 0.5 && (get_temp() - target_t).abs() < 1000 {
-                optimal_freqs.lock().unwrap().push(algo.curr_freq);
-            }
-
-            algo.step();
-
-            temperature_velocity_deviation_power += algo.pd_ctl.temp_velocity_err.abs() as i64;
-
-            std::thread::sleep(Duration::from_millis(config.min_period_ms as u64));
-        }
-
-        algo.limiter.limit_freq(*MAX_CPU_FREQ);
-
-        complex_stress_task.join().expect("what");
-
-        println!("deviation is {}", temperature_velocity_deviation_power);
-
-        temperature_velocity_deviation_power
-    };
-
-    let solve = |x_arr: [i64; 3], y_arr: [i64; 3]| -> (bool, i64) {
-        use mathru::algebra::linear::matrix::{General, Solve};
-        use mathru::{algebra::linear::vector::Vector, matrix};
-
-        let x_matrix = matrix![
-            x_arr[0].pow(2) as f64, x_arr[0] as f64, 1.0;
-            x_arr[1].pow(2) as f64, x_arr[1] as f64, 1.0;
-            x_arr[2].pow(2) as f64, x_arr[2] as f64, 1.0
-        ];
-        let y_vector = Vector::new_column(y_arr.map(|v| v as f64).to_vec());
-
-        let coeff_vector = x_matrix.solve(&y_vector).unwrap();
-
-        if coeff_vector[0] <= 0.0 {
-            println!("a value is {}", coeff_vector[0]);
-            return (false, 0);
-        } else if coeff_vector[1] > 0.0 {
-            println!("b value is {}", coeff_vector[1]);
-            return (false, 0);
-        } else {
-            return (true, (-coeff_vector[1] / (2.0 * coeff_vector[0])) as i64);
-        }
-    };
-
-    let mut x_mul = [15i64, 50, 150];
-    let mut power = [test(x_mul[0] as i32), test(x_mul[1] as i32), test(x_mul[2] as i32)];
-
-    let min_x = x_mul[power.iter().position(|x| *x == *power.iter().min().unwrap()).unwrap()];
-
-    let lower_x = (min_x / 2).clamp(1, i64::MAX);
-    let upper_x = min_x * 3 / 2;
-
-    x_mul = [lower_x, min_x, upper_x];
-    power = [test(x_mul[0] as i32), test(x_mul[1] as i32), test(x_mul[2] as i32)];
-    let (is_minimum, mut optimal_multiplier_64) = solve(x_mul, power);
-
-    if !is_minimum || optimal_multiplier_64 <= 0 || optimal_multiplier_64 > i32::MAX as i64 {
-        optimal_multiplier_64 =
-            x_mul[power.iter().position(|x| *x == *power.iter().min().unwrap()).unwrap()];
-    }
-
-    let optimal_multiplier = optimal_multiplier_64 as i32;
-
-    println!("optimal multiplier is {}", optimal_multiplier);
-
-    let mut clamp_min_freq = *MIN_CPU_FREQ;
-
-    let opt_freq_guard = optimal_freqs.lock().unwrap();
-    let len = opt_freq_guard.len();
-
-    if len == 0 {
-        println!("Optimal minimum clamp cpu frequency not found :(");
-    } else {
-        if len % 2 == 1 {
-            clamp_min_freq = opt_freq_guard[len / 2];
-        } else {
-            clamp_min_freq = (opt_freq_guard[len / 2] + opt_freq_guard[len / 2 - 1]) / 2;
-        }
-        clamp_min_freq = min(clamp_min_freq, opt_freq_guard.iter().sum::<i32>() / len as i32);
-        clamp_min_freq = *MIN_CPU_FREQ + (clamp_min_freq - *MIN_CPU_FREQ) / 2;
-        println!("Optimal minimum clamp cpu frequency is {}", clamp_min_freq);
-    }
-
-    println!("Do you want to set new default values? [Y/n]: ");
-    let input: String = text_io::read!("{}\n");
-    if !input.is_empty() && !input.to_ascii_lowercase().starts_with('y') {
-        println!("Ok, goodbye :)");
-        return;
-    }
-
-    let new_config =
-        JsonConfig { multiplier: optimal_multiplier as u16, min_freq: clamp_min_freq, ..config };
-
-    write_config(new_config).expect("idk");
-
-    println!("Optimal values have been found!");
 }
