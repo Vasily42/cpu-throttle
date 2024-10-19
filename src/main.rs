@@ -169,8 +169,7 @@ static MAX_CPU_FREQ: LazyLock<i32> =
 static MIN_CPU_FREQ: LazyLock<i32> =
     LazyLock::new(|| read_i32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"));
 
-static MAX_STEP_DOWN: LazyLock<i32> =
-    LazyLock::new(|| -(*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10);
+static MAX_STEP_DOWN: LazyLock<i32> = LazyLock::new(|| -(*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10);
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
     let mut find_cmd_output = Command::new("find")
@@ -200,12 +199,12 @@ struct PDController {
     target_t: i32,
     prev_t: i32,
     temp_velocity_err: f64,
-    multiplier: i32,
+    dynamic_multiplier: f64,
 }
 
 impl PDController {
     fn new(target_t: i32, multiplier: i32) -> Self {
-        Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, multiplier }
+        Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, dynamic_multiplier: 1.0 }
     }
 
     fn get_delta_freq(&mut self, t: i32) -> i32 {
@@ -223,9 +222,18 @@ impl PDController {
             -proportional_temp_diff
         };
 
+        let prev_err = self.temp_velocity_err;
+
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
 
-        let grad = self.multiplier as f64 * 1000.0 * self.temp_velocity_err;
+        if self.temp_velocity_err.abs() > 0.5 && prev_err.signum() != -self.temp_velocity_err.signum() {
+            self.dynamic_multiplier *= 1.2;
+        } else {
+            self.dynamic_multiplier *= 0.8;
+        }
+        self.dynamic_multiplier = self.dynamic_multiplier.clamp(1.0, 10.0);
+
+        let grad = self.dynamic_multiplier * 10000.0 * (self.temp_velocity_err);
 
         grad as i32
     }
