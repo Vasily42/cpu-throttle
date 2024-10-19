@@ -47,7 +47,6 @@ use std::{
 };
 
 const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
-const DEFAULT_MULTIPLIER: u16 = 100;
 const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
 const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
 const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
@@ -56,7 +55,6 @@ const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct JsonConfig {
-    multiplier: u16,
     min_freq: i32,
     min_period_ms: u16,
     max_period_ms: u16,
@@ -70,7 +68,6 @@ struct JsonConfig {
 impl Default for JsonConfig {
     fn default() -> Self {
         JsonConfig {
-            multiplier: DEFAULT_MULTIPLIER,
             min_freq: *MIN_CPU_FREQ,
             min_period_ms: DEFAULT_MIN_DISCRT_PERIOD_MS,
             max_period_ms: DEFAULT_MAX_DISCRT_PERIOD_MS,
@@ -93,7 +90,7 @@ struct ThrottlingAlgo {
 
 impl ThrottlingAlgo {
     fn new(target_t: i32, config: JsonConfig) -> Self {
-        let pd = PDController::new(target_t, config.multiplier as i32);
+        let pd = PDController::new(target_t);
         let limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
             match *N_CPUS {
                 1 => Box::new(UniformFrequencyLimiter),
@@ -203,7 +200,7 @@ struct PDController {
 }
 
 impl PDController {
-    fn new(target_t: i32, multiplier: i32) -> Self {
+    fn new(target_t: i32) -> Self {
         Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, dynamic_multiplier: 1.0 }
     }
 
