@@ -44,6 +44,7 @@ use std::{
 };
 
 const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
+const FULL_THROTTLE_MIN_TIME_MS: i32 = 5000;
 const DEFAULT_MAX_DESCENT_VELOCITY: f64 = 2.0;
 const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
 const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
@@ -86,12 +87,13 @@ struct ThrottlingAlgo {
     limiter: Box<dyn FrequencyLimiter>,
     overall_restlessness: f64,
     curr_freq: i32,
+    max_step_down: i32,
 }
 
 impl ThrottlingAlgo {
     fn new(target_t: i32, config: JsonConfig) -> Self {
         let pd = PDController::new(target_t, config);
-        let limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
+        let mut limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
             match *N_CPUS {
                 1 => Box::new(UniformFrequencyLimiter),
                 2.. => Box::new(MulticoreFrequencyLimiter::new(config.core_idleness_factor_ms)),
@@ -103,7 +105,16 @@ impl ThrottlingAlgo {
         } else {
             Box::new(UniformFrequencyLimiter)
         };
-        Self { config, pd_ctl: pd, limiter, overall_restlessness: 0.0, curr_freq: *MAX_CPU_FREQ }
+        limiter.limit_freq(*MAX_CPU_FREQ);
+        Self {
+            config,
+            pd_ctl: pd,
+            limiter,
+            overall_restlessness: 0.0,
+            curr_freq: *MAX_CPU_FREQ,
+            max_step_down: (*MAX_CPU_FREQ - *MIN_CPU_FREQ)
+                / (FULL_THROTTLE_MIN_TIME_MS / config.min_period_ms as i32).max(1),
+        }
     }
 
     fn step(&mut self) -> i32 {
@@ -129,7 +140,7 @@ impl ThrottlingAlgo {
             }
 
             if self.overall_restlessness >= 0.9 {
-                self.curr_freq -= delta_freq.max(*MAX_STEP_DOWN);
+                self.curr_freq -= delta_freq.min(self.max_step_down);
                 self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
 
                 self.limiter.limit_freq(self.curr_freq);
@@ -146,7 +157,7 @@ impl ThrottlingAlgo {
                     * (1.0 - self.overall_restlessness)) as i32;
         } else {
             if self.curr_freq < *MAX_CPU_FREQ || delta_freq > 0 {
-                self.curr_freq -= delta_freq.max(*MAX_STEP_DOWN);
+                self.curr_freq -= delta_freq.min(self.max_step_down);
                 self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
 
                 self.limiter.limit_freq(self.curr_freq);
@@ -165,8 +176,6 @@ static MAX_CPU_FREQ: LazyLock<i32> =
 
 static MIN_CPU_FREQ: LazyLock<i32> =
     LazyLock::new(|| read_i32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"));
-
-static MAX_STEP_DOWN: LazyLock<i32> = LazyLock::new(|| -(*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10);
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
     let mut find_cmd_output = Command::new("find")
@@ -229,7 +238,8 @@ impl PDController {
 
         let proportional_temp_diff = (current_t - self.target_t) as f64 / 1000.0;
         let target_temp_velocity_curve = if proportional_temp_diff > 0.0 {
-            self.max_descent_velocity * ((-proportional_temp_diff / self.max_descent_velocity).exp() - 1.0)
+            self.max_descent_velocity
+                * ((-proportional_temp_diff / self.max_descent_velocity).exp() - 1.0)
         } else {
             -proportional_temp_diff
         };
