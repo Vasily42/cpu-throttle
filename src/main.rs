@@ -39,11 +39,12 @@ use std::{
             AtomicBool, AtomicI32,
             Ordering::{self, *},
         },
-        Arc, LazyLock
+        Arc, LazyLock,
     },
 };
 
 const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
+const DEFAULT_MAX_DESCENT_VELOCITY: f64 = 2.0;
 const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
 const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
 const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
@@ -53,6 +54,7 @@ const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct JsonConfig {
     min_freq: i32,
+    max_descent_velocity: f64,
     min_period_ms: u16,
     max_period_ms: u16,
     start_time_ms: u16,
@@ -66,6 +68,7 @@ impl Default for JsonConfig {
     fn default() -> Self {
         JsonConfig {
             min_freq: *MIN_CPU_FREQ,
+            max_descent_velocity: DEFAULT_MAX_DESCENT_VELOCITY,
             min_period_ms: DEFAULT_MIN_DISCRT_PERIOD_MS,
             max_period_ms: DEFAULT_MAX_DISCRT_PERIOD_MS,
             start_time_ms: DEFAULT_THROTTLING_START_TIME_MS,
@@ -193,6 +196,7 @@ struct PDController {
     target_t: i32,
     prev_t: i32,
     temp_velocity_err: f64,
+    max_descent_velocity: f64,
     dynamic_multiplier: f64,
     accel_m: f64,
     decel_m: f64,
@@ -208,6 +212,7 @@ impl PDController {
             target_t,
             prev_t: get_temp(),
             temp_velocity_err: 0.0,
+            max_descent_velocity: config.max_descent_velocity,
             dynamic_multiplier: 1.0,
             accel_m: accel,
             decel_m: decel,
@@ -224,7 +229,7 @@ impl PDController {
 
         let proportional_temp_diff = (current_t - self.target_t) as f64 / 1000.0;
         let target_temp_velocity_curve = if proportional_temp_diff > 0.0 {
-            2.0 * ((-0.5 * proportional_temp_diff).exp() - 1.0)
+            self.max_descent_velocity * ((-proportional_temp_diff / self.max_descent_velocity).exp() - 1.0)
         } else {
             -proportional_temp_diff
         };
