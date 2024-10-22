@@ -87,7 +87,7 @@ struct ThrottlingAlgo {
 
 impl ThrottlingAlgo {
     fn new(target_t: i32, config: JsonConfig) -> Self {
-        let pd = PDController::new(target_t);
+        let pd = PDController::new(target_t, config);
         let limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
             match *N_CPUS {
                 1 => Box::new(UniformFrequencyLimiter),
@@ -194,11 +194,24 @@ struct PDController {
     prev_t: i32,
     temp_velocity_err: f64,
     dynamic_multiplier: f64,
+    accel_m: f64,
+    decel_m: f64,
 }
 
 impl PDController {
-    fn new(target_t: i32) -> Self {
-        Self { target_t, prev_t: get_temp(), temp_velocity_err: 0.0, dynamic_multiplier: 1.0 }
+    fn new(target_t: i32, config: JsonConfig) -> Self {
+        const ACCEL10_TIME_MS: f64 = 800.0;
+        const DECEL10_TIME_MS: f64 = 700.0;
+        let accel = (10.0_f64).powf(1.0 / (ACCEL10_TIME_MS / config.min_period_ms as f64));
+        let decel = 1.0 / (10.0_f64).powf(1.0 / (DECEL10_TIME_MS / config.min_period_ms as f64));
+        Self {
+            target_t,
+            prev_t: get_temp(),
+            temp_velocity_err: 0.0,
+            dynamic_multiplier: 1.0,
+            accel_m: accel,
+            decel_m: decel,
+        }
     }
 
     fn get_delta_freq(&mut self, t: i32) -> i32 {
@@ -220,14 +233,16 @@ impl PDController {
 
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
 
-        if self.temp_velocity_err.abs() > 0.5 && prev_err.signum() != -self.temp_velocity_err.signum() {
-            self.dynamic_multiplier *= 1.2;
+        if self.temp_velocity_err.abs() > 0.5
+            && prev_err.signum() != -self.temp_velocity_err.signum()
+        {
+            self.dynamic_multiplier *= self.accel_m;
         } else {
-            self.dynamic_multiplier *= 0.8;
+            self.dynamic_multiplier *= self.decel_m;
         }
-        self.dynamic_multiplier = self.dynamic_multiplier.clamp(1.0, 10.0);
+        self.dynamic_multiplier = self.dynamic_multiplier.clamp(1.0, 100.0);
 
-        let grad = self.dynamic_multiplier * 10000.0 * (self.temp_velocity_err);
+        let grad = self.dynamic_multiplier * 1000.0 * (self.temp_velocity_err);
 
         grad as i32
     }
