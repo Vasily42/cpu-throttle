@@ -44,7 +44,7 @@ use std::{
 };
 
 const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
-const FULL_THROTTLE_MIN_TIME_MS: i32 = 5000;
+const DEFAULT_FULL_THROTTLE_MIN_TIME_MS: i32 = 4000;
 const DEFAULT_MAX_DESCENT_VELOCITY: f64 = 2.0;
 const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
 const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
@@ -55,6 +55,7 @@ const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct JsonConfig {
     min_freq: i32,
+    full_throttle_min_time_ms: i32,
     max_descent_velocity: f64,
     min_period_ms: u16,
     max_period_ms: u16,
@@ -69,6 +70,7 @@ impl Default for JsonConfig {
     fn default() -> Self {
         JsonConfig {
             min_freq: *MIN_CPU_FREQ,
+            full_throttle_min_time_ms: DEFAULT_FULL_THROTTLE_MIN_TIME_MS,
             max_descent_velocity: DEFAULT_MAX_DESCENT_VELOCITY,
             min_period_ms: DEFAULT_MIN_DISCRT_PERIOD_MS,
             max_period_ms: DEFAULT_MAX_DISCRT_PERIOD_MS,
@@ -113,7 +115,7 @@ impl ThrottlingAlgo {
             overall_restlessness: 0.0,
             curr_freq: *MAX_CPU_FREQ,
             max_step_down: (*MAX_CPU_FREQ - *MIN_CPU_FREQ)
-                / (FULL_THROTTLE_MIN_TIME_MS / config.min_period_ms as i32).max(1),
+                / (config.full_throttle_min_time_ms / config.min_period_ms as i32).max(1),
         }
     }
 
