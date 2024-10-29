@@ -51,6 +51,8 @@ const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
 const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
 const DEFAULT_THROTTLING_RELEASE_TIME_MS: u16 = 12000;
 const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
+const DEFAULT_IDLE_THRESHOLD: f64 = 0.1;
+
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct JsonConfig {
@@ -62,6 +64,7 @@ struct JsonConfig {
     start_time_ms: u16,
     release_time_ms: u16,
     core_idleness_factor_ms: u16,
+    idle_threshold: f64,
     has_idle: bool,
     multicore_limiter_allowed: bool,
 }
@@ -77,6 +80,7 @@ impl Default for JsonConfig {
             start_time_ms: DEFAULT_THROTTLING_START_TIME_MS,
             release_time_ms: DEFAULT_THROTTLING_RELEASE_TIME_MS,
             core_idleness_factor_ms: DEFAULT_CORE_IDLENESS_FACTOR_MS,
+            idle_threshold: DEFAULT_IDLE_THRESHOLD,
             has_idle: true,
             multicore_limiter_allowed: true,
         }
@@ -88,6 +92,7 @@ struct ThrottlingAlgo {
     pd_ctl: PDController,
     limiter: Box<dyn FrequencyLimiter>,
     overall_restlessness: f64,
+    overall_restlessness_threshold: f64,
     curr_freq: i32,
     max_step_down: i32,
 }
@@ -113,6 +118,7 @@ impl ThrottlingAlgo {
             pd_ctl: pd,
             limiter,
             overall_restlessness: 0.0,
+            overall_restlessness_threshold: 1.0 - config.idle_threshold,
             curr_freq: *MAX_CPU_FREQ,
             max_step_down: (*MAX_CPU_FREQ - *MIN_CPU_FREQ)
                 / (config.full_throttle_min_time_ms / config.min_period_ms as i32).max(1),
@@ -141,7 +147,7 @@ impl ThrottlingAlgo {
                 }
             }
 
-            if self.overall_restlessness >= 0.9 {
+            if self.overall_restlessness >= self.overall_restlessness_threshold {
                 self.curr_freq -= delta_freq.min(self.max_step_down);
                 self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
 
