@@ -44,6 +44,8 @@ use std::{
 };
 
 const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
+const DEFAULT_MIN_MULTIPLIER: u16 = 5;
+const DEFAULT_MAX_MULTIPLIER: u16 = 150;
 const DEFAULT_FULL_THROTTLE_MIN_TIME_MS: i32 = 4000;
 const DEFAULT_MAX_DESCENT_VELOCITY: f64 = 2.0;
 const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
@@ -57,6 +59,8 @@ const DEFAULT_IDLE_THRESHOLD: f64 = 0.1;
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct JsonConfig {
     min_freq: i32,
+    min_multiplier: u16,
+    max_multiplier: u16,
     full_throttle_min_time_ms: i32,
     max_descent_velocity: f64,
     min_period_ms: u16,
@@ -73,6 +77,8 @@ impl Default for JsonConfig {
     fn default() -> Self {
         JsonConfig {
             min_freq: *MIN_CPU_FREQ,
+            min_multiplier: DEFAULT_MIN_MULTIPLIER,
+            max_multiplier: DEFAULT_MAX_MULTIPLIER,
             full_throttle_min_time_ms: DEFAULT_FULL_THROTTLE_MIN_TIME_MS,
             max_descent_velocity: DEFAULT_MAX_DESCENT_VELOCITY,
             min_period_ms: DEFAULT_MIN_DISCRT_PERIOD_MS,
@@ -215,6 +221,8 @@ struct PDController {
     temp_velocity_err: f64,
     max_descent_velocity: f64,
     dynamic_multiplier: f64,
+    min_multiplier: f64,
+    max_multiplier: f64,
     accel_m: f64,
     decel_m: f64,
 }
@@ -231,6 +239,8 @@ impl PDController {
             temp_velocity_err: 0.0,
             max_descent_velocity: config.max_descent_velocity,
             dynamic_multiplier: 1.0,
+            min_multiplier: config.min_multiplier as f64,
+            max_multiplier: config.max_multiplier as f64,
             accel_m: accel,
             decel_m: decel,
         }
@@ -263,7 +273,7 @@ impl PDController {
         } else {
             self.dynamic_multiplier *= self.decel_m;
         }
-        self.dynamic_multiplier = self.dynamic_multiplier.clamp(1.0, 100.0);
+        self.dynamic_multiplier = self.dynamic_multiplier.clamp(self.min_multiplier, self.max_multiplier);
 
         let grad = self.dynamic_multiplier * 1000.0 * (self.temp_velocity_err);
 
