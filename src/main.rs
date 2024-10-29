@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::Permissions,
     i32,
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::Path,
     process::Command,
@@ -43,7 +44,7 @@ use std::{
     },
 };
 
-const CONFIG_PATH: &str = "/etc/cpu-throttle/config.json";
+const CONFIG_DIR: &str = "/etc/cpu-throttle";
 const DEFAULT_MIN_MULTIPLIER: u16 = 5;
 const DEFAULT_MAX_MULTIPLIER: u16 = 150;
 const DEFAULT_FULL_THROTTLE_MIN_TIME_MS: i32 = 4000;
@@ -273,7 +274,8 @@ impl PDController {
         } else {
             self.dynamic_multiplier *= self.decel_m;
         }
-        self.dynamic_multiplier = self.dynamic_multiplier.clamp(self.min_multiplier, self.max_multiplier);
+        self.dynamic_multiplier =
+            self.dynamic_multiplier.clamp(self.min_multiplier, self.max_multiplier);
 
         let grad = self.dynamic_multiplier * 1000.0 * (self.temp_velocity_err);
 
@@ -545,27 +547,42 @@ fn read_i32(path: &str) -> i32 {
 }
 
 fn read_config() -> Result<JsonConfig, std::io::Error> {
-    let bytes_json = std::fs::read(CONFIG_PATH)?;
+    let bytes_json = std::fs::read(CONFIG_DIR.to_owned() + "/config.json")?;
     Ok(serde_json::from_str(from_utf8(&bytes_json).unwrap()).expect("json parse error"))
 }
 
 fn write_config(config: JsonConfig) -> Result<(), ()> {
-    let config_path = Path::new(CONFIG_PATH);
-    if !config_path.exists() {
+    if !Path::new(CONFIG_DIR).exists() {
         if !is_superuser::is_superuser() {
             return Err(());
         }
-        let parent_dir = config_path.parent().unwrap();
-        if !parent_dir.exists() {
-            std::fs::DirBuilder::new()
-                .create(parent_dir)
-                .expect("failed creating parent dir in /etc");
-        }
-        std::fs::File::create(config_path).expect("Cannot create config.json");
-        std::fs::set_permissions(config_path, Permissions::from_mode(0o666))
-            .expect("Cannot set permissions on config.json");
+        std::process::Command::new("mkdir")
+            .arg("-p")
+            .arg(CONFIG_DIR.to_owned() + "/profiles")
+            .status()
+            .expect("cannot create config paths");
+
+        std::fs::File::create(CONFIG_DIR.to_owned() + "/profiles/default.json")
+            .expect("Cannot create config.json");
+        std::fs::set_permissions(
+            CONFIG_DIR.to_owned() + "/profiles/default.json",
+            Permissions::from_mode(0o644),
+        )
+        .expect("Cannot set permissions on config.json");
+
+        std::process::Command::new("ln")
+            .arg("-s")
+            .arg("profiles/default.json")
+            .arg(CONFIG_DIR.to_owned() + "/config.json")
+            .status()
+            .unwrap();
     }
-    std::fs::write(config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let mut config_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(CONFIG_DIR.to_owned() + "/config.json")
+        .unwrap();
+    config_file.write(serde_json::to_string_pretty(&config).unwrap().as_bytes()).unwrap();
+
     Ok(())
 }
 
