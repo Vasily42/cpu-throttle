@@ -345,7 +345,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
     }
 }
 
-#[derive(Subcommand, PartialEq, Clone, Copy)]
+#[derive(Subcommand, PartialEq, Clone)]
 enum InterThreadMessage {
     /// Pause throttling
     Pause,
@@ -406,7 +406,7 @@ impl FromStr for InterThreadMessage {
     }
 }
 
-#[derive(clap::Args, Clone, Copy, PartialEq)]
+#[derive(clap::Args, Clone, PartialEq)]
 struct TempArg {
     temperature: i32,
 }
