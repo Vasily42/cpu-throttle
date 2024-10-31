@@ -353,12 +353,14 @@ enum InterThreadMessage {
     Continue,
     /// Pause/Continue throttling
     Toggle,
-    /// Read new values from config files (for internal use mostly)
+    /// Read config.json again and apply it
     ReadConfig,
     /// Exit all threads, finish with success code
     Exit,
     /// Set target temperature
     At(TempArg),
+    /// Switch symbolic link config.json to profiles/<config_name>.json and apply it immediately
+    SwitchConfig(SwitchConfigArg),
 }
 
 impl ToString for InterThreadMessage {
@@ -370,6 +372,9 @@ impl ToString for InterThreadMessage {
             InterThreadMessage::ReadConfig => String::from("read-config"),
             InterThreadMessage::Exit => String::from("exit"),
             InterThreadMessage::At(temperature) => temperature.temperature.to_string(),
+            InterThreadMessage::SwitchConfig(arg) => {
+                String::from("switch-config:") + &arg.config_name
+            }
         }
     }
 }
@@ -384,10 +389,19 @@ impl FromStr for InterThreadMessage {
             "toggle" => Ok(InterThreadMessage::Toggle),
             "read-config" => Ok(InterThreadMessage::ReadConfig),
             "exit" => Ok(InterThreadMessage::Exit),
-            maybe_num => match maybe_num.parse::<i32>().ok() {
-                Some(t) => Ok(InterThreadMessage::At(TempArg { temperature: t })),
-                None => Err("There is no such signal".to_string()),
-            },
+            variable_length => {
+                if let Some(t) = variable_length.parse::<i32>().ok() {
+                    return Ok(InterThreadMessage::At(TempArg { temperature: t }));
+                }
+
+                if variable_length.starts_with("switch-config") {
+                    return Ok(InterThreadMessage::SwitchConfig(SwitchConfigArg {
+                        config_name: String::from(variable_length.split(':').last().unwrap()),
+                    }));
+                }
+
+                Err("There is no such signal".to_string())
+            }
         }
     }
 }
@@ -395,6 +409,11 @@ impl FromStr for InterThreadMessage {
 #[derive(clap::Args, Clone, Copy, PartialEq)]
 struct TempArg {
     temperature: i32,
+}
+
+#[derive(clap::Args, Clone, PartialEq)]
+struct SwitchConfigArg {
+    config_name: String,
 }
 
 #[derive(Parser)]
@@ -481,6 +500,11 @@ fn main() -> Result<(), i32> {
                     target_t = temp_arg.temperature * 1000;
                     algo.pd_ctl.target_t = target_t;
                 }
+                SwitchConfig(sw_arg) => {
+                    switch_config(sw_arg.config_name).unwrap();
+                    config = read_config().unwrap();
+                    algo = ThrottlingAlgo::new(target_t, config);
+                }
                 Exit => {
                     break;
                 }
@@ -545,6 +569,21 @@ fn read_i32(path: &str) -> i32 {
     let value = trimmed.parse().unwrap();
 
     value
+}
+
+fn switch_config(name: String) -> Result<(), ()> {
+    if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/" + &name + ".json")).exists()
+        || !is_superuser::is_superuser()
+    {
+        return Err(());
+    }
+    std::process::Command::new("ln")
+        .arg("-sf")
+        .arg(String::from("profiles/") + &name + ".json")
+        .arg(CONFIG_DIR.to_owned() + "/config.json")
+        .status()
+        .unwrap();
+    Ok(())
 }
 
 fn read_config() -> Result<JsonConfig, std::io::Error> {
