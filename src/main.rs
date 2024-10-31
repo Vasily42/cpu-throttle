@@ -432,7 +432,7 @@ fn main() -> Result<(), i32> {
         }
     };
 
-    let target_t = target_temperature * 1000;
+    let mut target_t = target_temperature * 1000;
 
     let mut config = match read_config() {
         Ok(config) => config,
@@ -477,8 +477,9 @@ fn main() -> Result<(), i32> {
                     config = read_config().unwrap();
                     algo = ThrottlingAlgo::new(target_t, config);
                 }
-                At(temperature) => {
-                    algo.pd_ctl.target_t = temperature.temperature * 1000;
+                At(temp_arg) => {
+                    target_t = temp_arg.temperature * 1000;
+                    algo.pd_ctl.target_t = target_t;
                 }
                 Exit => {
                     break;
