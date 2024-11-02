@@ -53,7 +53,6 @@ const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
 const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
 const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
 const DEFAULT_THROTTLING_RELEASE_TIME_MS: u16 = 12000;
-const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
 const DEFAULT_IDLE_THRESHOLD: f64 = 0.1;
 
 
@@ -69,7 +68,6 @@ struct JsonConfig {
     max_period_ms: u16,
     start_time_ms: u16,
     release_time_ms: u16,
-    core_idleness_factor_ms: u16,
     idle_threshold: f64,
     has_idle: bool,
     multicore_limiter_allowed: bool,
@@ -87,7 +85,6 @@ impl Default for JsonConfig {
             max_period_ms: DEFAULT_MAX_DISCRT_PERIOD_MS,
             start_time_ms: DEFAULT_THROTTLING_START_TIME_MS,
             release_time_ms: DEFAULT_THROTTLING_RELEASE_TIME_MS,
-            core_idleness_factor_ms: DEFAULT_CORE_IDLENESS_FACTOR_MS,
             idle_threshold: DEFAULT_IDLE_THRESHOLD,
             has_idle: true,
             multicore_limiter_allowed: true,
@@ -111,7 +108,7 @@ impl ThrottlingAlgo {
         let mut limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
             match *N_CPUS {
                 1 => Box::new(UniformFrequencyLimiter),
-                2.. => Box::new(MulticoreFrequencyLimiter::new(config.core_idleness_factor_ms)),
+                2.. => Box::new(MulticoreFrequencyLimiter),
                 _ => {
                     eprintln!("wtf");
                     panic!()
@@ -302,19 +299,7 @@ impl FrequencyLimiter for UniformFrequencyLimiter {
     }
 }
 
-struct MulticoreFrequencyLimiter {
-    cpu_idleness: Vec<u16>,
-    core_idleness_factor_ms: u16,
-}
-
-impl MulticoreFrequencyLimiter {
-    fn new(core_idleness_factor_ms: u16) -> Self {
-        MulticoreFrequencyLimiter {
-            cpu_idleness: vec![core_idleness_factor_ms; *N_CPUS as usize],
-            core_idleness_factor_ms,
-        }
-    }
-}
+struct MulticoreFrequencyLimiter;
 
 impl FrequencyLimiter for MulticoreFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
@@ -322,14 +307,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
             let curr_freq =
                 read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
 
-            if curr_freq > *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
-                self.cpu_idleness[i] = 0
-            } else if curr_freq < *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.2) as i32 {
-                self.cpu_idleness[i] += DISCRT_PERIOD_MS.load(Relaxed) as u16;
-                self.cpu_idleness[i] = self.cpu_idleness[i].min(self.core_idleness_factor_ms);
-            }
-
-            if self.cpu_idleness[i] >= self.core_idleness_factor_ms {
+            if curr_freq - freq > (*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10 {
                 std::fs::write(
                     format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
                     (*MAX_CPU_FREQ).to_string(),
