@@ -1,0 +1,10 @@
+{
+  "min_multiplier": 75,
+  "max_multiplier": 150,
+  "full_throttle_min_time_ms": 300,
+  "max_descent_velocity": 5.0,
+  "min_period_ms": 100,
+  "max_period_ms": 300,
+  "has_idle": false,
+  "multicore_limiter_allowed": false
+}
