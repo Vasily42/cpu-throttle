@@ -571,7 +571,7 @@ fn read_config() -> Result<JsonConfig, std::io::Error> {
 }
 
 fn write_config(config: JsonConfig) -> Result<(), ()> {
-    if !Path::new(CONFIG_DIR).exists() {
+    if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/default.json")).exists() {
         if !is_superuser::is_superuser() {
             return Err(());
         }
