@@ -58,6 +58,7 @@ const DEFAULT_IDLE_THRESHOLD: f64 = 0.1;
 
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
 struct JsonConfig {
     min_freq: i32,
     min_multiplier: u16,
