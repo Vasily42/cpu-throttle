@@ -432,11 +432,40 @@ fn main() -> Result<(), i32> {
 
     let mut target_t = target_temperature * 1000;
 
+    if !is_superuser::is_superuser() {
+        eprintln!("Run with sudo!");
+    }
+
+    if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/default.json")).exists() {
+        std::process::Command::new("mkdir")
+            .arg("-p")
+            .arg(CONFIG_DIR.to_owned() + "/profiles")
+            .status()
+            .expect("cannot create config paths");
+
+        std::fs::File::create(CONFIG_DIR.to_owned() + "/profiles/default.json")
+            .expect("Cannot create config.json");
+        std::fs::set_permissions(
+            CONFIG_DIR.to_owned() + "/profiles/default.json",
+            Permissions::from_mode(0o644),
+        )
+        .expect("Cannot set permissions on config.json");
+
+        if !Path::new(&(CONFIG_DIR.to_owned() + "/config.json")).exists() {
+            std::process::Command::new("ln")
+                .arg("-s")
+                .arg("profiles/default.json")
+                .arg(CONFIG_DIR.to_owned() + "/config.json")
+                .status()
+                .unwrap();
+        }
+    }
+
     let mut config = match read_config() {
         Ok(config) => config,
         Err(_) => {
             let default_config = JsonConfig::default();
-            write_config(default_config).expect("Cannot write config");
+            write_config(default_config);
             default_config
         }
     };
@@ -565,44 +594,18 @@ fn switch_config(name: String) -> Result<(), ()> {
     Ok(())
 }
 
-fn read_config() -> Result<JsonConfig, std::io::Error> {
-    let bytes_json = std::fs::read(CONFIG_DIR.to_owned() + "/config.json")?;
-    Ok(serde_json::from_str(from_utf8(&bytes_json).unwrap()).expect("json parse error"))
+fn read_config() -> Result<JsonConfig, ()> {
+    let bytes_json = std::fs::read(CONFIG_DIR.to_owned() + "/config.json").unwrap();
+    let json = serde_json::from_str::<JsonConfig>(from_utf8(&bytes_json).unwrap());
+    json.map_err(|_| ())
 }
 
-fn write_config(config: JsonConfig) -> Result<(), ()> {
-    if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/default.json")).exists() {
-        if !is_superuser::is_superuser() {
-            return Err(());
-        }
-        std::process::Command::new("mkdir")
-            .arg("-p")
-            .arg(CONFIG_DIR.to_owned() + "/profiles")
-            .status()
-            .expect("cannot create config paths");
-
-        std::fs::File::create(CONFIG_DIR.to_owned() + "/profiles/default.json")
-            .expect("Cannot create config.json");
-        std::fs::set_permissions(
-            CONFIG_DIR.to_owned() + "/profiles/default.json",
-            Permissions::from_mode(0o644),
-        )
-        .expect("Cannot set permissions on config.json");
-
-        std::process::Command::new("ln")
-            .arg("-s")
-            .arg("profiles/default.json")
-            .arg(CONFIG_DIR.to_owned() + "/config.json")
-            .status()
-            .unwrap();
-    }
+fn write_config(config: JsonConfig) {
     let mut config_file = std::fs::OpenOptions::new()
         .write(true)
         .open(CONFIG_DIR.to_owned() + "/config.json")
         .unwrap();
     config_file.write(serde_json::to_string_pretty(&config).unwrap().as_bytes()).unwrap();
-
-    Ok(())
 }
 
 fn already_run() -> bool {
