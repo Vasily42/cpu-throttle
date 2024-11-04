@@ -228,7 +228,7 @@ struct PDController {
 
 impl PDController {
     fn new(target_t: i32, config: JsonConfig) -> Self {
-        const ACCEL10_TIME_MS: f64 = 800.0;
+        const ACCEL10_TIME_MS: f64 = 1500.0;
         const DECEL10_TIME_MS: f64 = 700.0;
         let accel = (10.0_f64).powf(1.0 / (ACCEL10_TIME_MS / config.min_period_ms as f64));
         let decel = 1.0 / (10.0_f64).powf(1.0 / (DECEL10_TIME_MS / config.min_period_ms as f64));
