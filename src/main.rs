@@ -307,7 +307,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
             let curr_freq =
                 read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
 
-            if curr_freq - freq > (*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10 {
+            if freq - curr_freq > (*MAX_CPU_FREQ - *MIN_CPU_FREQ) / 10 {
                 std::fs::write(
                     format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
                     (*MAX_CPU_FREQ).to_string(),
