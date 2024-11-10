@@ -148,9 +148,10 @@ impl ThrottlingAlgo {
                     self.overall_restlessness = 1.0;
                 }
             } else if self.curr_freq == *MAX_CPU_FREQ {
-                self.overall_restlessness -=
-                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_time_ms as f64;
-                if self.overall_restlessness < 0.0 {
+                self.overall_restlessness *= (0.1_f64).powf(
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_time_ms as f64,
+                );
+                if self.overall_restlessness < 0.01 {
                     self.overall_restlessness = 0.0;
                 }
             }
