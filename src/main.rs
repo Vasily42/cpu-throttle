@@ -47,13 +47,13 @@ use std::{
 const CONFIG_DIR: &str = "/etc/cpu-throttle";
 const DEFAULT_MIN_MULTIPLIER: u16 = 5;
 const DEFAULT_MAX_MULTIPLIER: u16 = 150;
-const DEFAULT_FULL_THROTTLE_MIN_TIME_MS: i32 = 4000;
+const DEFAULT_FULL_THROTTLE_MIN_TIME_MS: i32 = 1000;
 const DEFAULT_MAX_DESCENT_VELOCITY: f64 = 2.0;
 const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
 const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
 const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
 const DEFAULT_THROTTLING_RELEASE_TIME_MS: u16 = 12000;
-const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 7000;
+const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 1000;
 const DEFAULT_IDLE_THRESHOLD: f64 = 0.1;
 
 
@@ -231,8 +231,8 @@ struct PDController {
 
 impl PDController {
     fn new(target_t: i32, config: JsonConfig) -> Self {
-        const ACCEL10_TIME_MS: f64 = 1500.0;
-        const DECEL10_TIME_MS: f64 = 700.0;
+        const ACCEL10_TIME_MS: f64 = 1000.0;
+        const DECEL10_TIME_MS: f64 = 1000.0;
         let accel = (10.0_f64).powf(1.0 / (ACCEL10_TIME_MS / config.min_period_ms as f64));
         let decel = 1.0 / (10.0_f64).powf(1.0 / (DECEL10_TIME_MS / config.min_period_ms as f64));
         Self {
