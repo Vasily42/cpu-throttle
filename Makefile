@@ -15,6 +15,10 @@ install: $(TARGET)
 	install -m755 -o root -g root $(TARGET) $(DESTDIR)$(BINDIR)/
 	mkdir -p $(DESTDIR)/usr/lib/systemd/system
 	install -m644 -o root -g root misc/*.service $(DESTDIR)/usr/lib/systemd/system/
+	mkdir -p $(DESTDIR)/usr/share/bash-completion/completions
+	install -m644 -o root -g root misc/bash-completion.sh $(DESTDIR)/usr/share/bash-completion/completions/cpu-throttle
+	mkdir -p $(DESTDIR)/usr/share/zsh/site-functions
+	install -m644 -o root -g root misc/zsh-completion.sh $(DESTDIR)/usr/share/zsh/site-functions/_cpu-throttle
 	mkdir -p $(DESTDIR)/etc/cpu-throttle/profiles/
 	install -m644 -o root -g root misc/profiles/* $(DESTDIR)/etc/cpu-throttle/profiles/
 
