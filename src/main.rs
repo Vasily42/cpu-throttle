@@ -331,7 +331,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
             let curr_freq =
                 read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
 
-            if curr_freq >= *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
+            if curr_freq > *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
                 self.cpu_idleness[i] = 0
             } else if curr_freq <= *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.2) as i32 {
                 self.cpu_idleness[i] += DISCRT_PERIOD_MS.load(Relaxed) as u16;
