@@ -223,7 +223,9 @@ struct PDController {
     prev_t: i32,
     temp_velocity_err: f64,
     max_descent_velocity: f64,
-    dynamic_multiplier: f64,
+    dynamic_multiplier_real: f64,
+    dynamic_multiplier_smoothed: f64,
+    smoothing_coeff: f64,
     min_multiplier: f64,
     max_multiplier: f64,
     accel_m: f64,
@@ -232,16 +234,18 @@ struct PDController {
 
 impl PDController {
     fn new(target_t: i32, config: JsonConfig) -> Self {
-        const ACCEL10_TIME_MS: f64 = 1000.0;
-        const DECEL10_TIME_MS: f64 = 1000.0;
+        const ACCEL10_TIME_MS: f64 = 300.0;
         let accel = (10.0_f64).powf(1.0 / (ACCEL10_TIME_MS / config.min_period_ms as f64));
-        let decel = 1.0 / (10.0_f64).powf(1.0 / (DECEL10_TIME_MS / config.min_period_ms as f64));
+        let decel = 1.0 / (10.0_f64).powf(1.0 / (ACCEL10_TIME_MS / config.min_period_ms as f64));
+        let smoothing_period = (4.0 * (ACCEL10_TIME_MS / config.min_period_ms as f64)).max(1.0);
         Self {
             target_t,
             prev_t: get_temp(),
             temp_velocity_err: 0.0,
             max_descent_velocity: config.max_descent_velocity,
-            dynamic_multiplier: 1.0,
+            dynamic_multiplier_real: 1.0,
+            dynamic_multiplier_smoothed: 1.0,
+            smoothing_coeff: 1.0 - 2.0 / (smoothing_period + 1.0),
             min_multiplier: config.min_multiplier as f64,
             max_multiplier: config.max_multiplier as f64,
             accel_m: accel,
@@ -272,14 +276,18 @@ impl PDController {
         if self.temp_velocity_err.abs() > 0.5
             && prev_err.signum() != -self.temp_velocity_err.signum()
         {
-            self.dynamic_multiplier *= self.accel_m;
+            self.dynamic_multiplier_real *= self.accel_m;
         } else {
-            self.dynamic_multiplier *= self.decel_m;
+            self.dynamic_multiplier_real *= self.decel_m;
         }
-        self.dynamic_multiplier =
-            self.dynamic_multiplier.clamp(self.min_multiplier, self.max_multiplier);
 
-        let grad = self.dynamic_multiplier * 1000.0 * (self.temp_velocity_err);
+        self.dynamic_multiplier_real =
+            self.dynamic_multiplier_real.clamp(self.min_multiplier, self.max_multiplier);
+
+        self.dynamic_multiplier_smoothed = self.smoothing_coeff * self.dynamic_multiplier_smoothed
+            + (1.0 - self.smoothing_coeff) * self.dynamic_multiplier_real;
+
+        let grad = self.dynamic_multiplier_smoothed * 1000.0 * (self.temp_velocity_err);
 
         grad as i32
     }
