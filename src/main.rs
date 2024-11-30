@@ -355,7 +355,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
     }
 }
 
-#[derive(Subcommand, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Subcommand, PartialEq, Clone)]
 enum InterThreadMessage {
     /// Pause throttling
     Pause,
@@ -373,55 +373,12 @@ enum InterThreadMessage {
     SwitchConfig(SwitchConfigArg),
 }
 
-impl ToString for InterThreadMessage {
-    fn to_string(&self) -> String {
-        match self {
-            InterThreadMessage::Pause => String::from("pause"),
-            InterThreadMessage::Continue => String::from("continue"),
-            InterThreadMessage::Toggle => String::from("toggle"),
-            InterThreadMessage::ReadConfig => String::from("read-config"),
-            InterThreadMessage::Exit => String::from("exit"),
-            InterThreadMessage::At(temperature) => temperature.temperature.to_string(),
-            InterThreadMessage::SwitchConfig(arg) => {
-                String::from("switch-config:") + &arg.config_name
-            }
-        }
-    }
-}
-
-impl FromStr for InterThreadMessage {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim_end_matches('\0').to_lowercase().as_str() {
-            "pause" => Ok(InterThreadMessage::Pause),
-            "continue" => Ok(InterThreadMessage::Continue),
-            "toggle" => Ok(InterThreadMessage::Toggle),
-            "read-config" => Ok(InterThreadMessage::ReadConfig),
-            "exit" => Ok(InterThreadMessage::Exit),
-            variable_length => {
-                if let Some(t) = variable_length.parse::<i32>().ok() {
-                    return Ok(InterThreadMessage::At(TempArg { temperature: t }));
-                }
-
-                if variable_length.starts_with("switch-config") {
-                    return Ok(InterThreadMessage::SwitchConfig(SwitchConfigArg {
-                        config_name: String::from(variable_length.split(':').last().unwrap()),
-                    }));
-                }
-
-                Err("There is no such signal".to_string())
-            }
-        }
-    }
-}
-
-#[derive(clap::Args, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, clap::Args, Clone, PartialEq)]
 struct TempArg {
     temperature: i32,
 }
 
-#[derive(clap::Args, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, clap::Args, Clone, PartialEq)]
 struct SwitchConfigArg {
     config_name: String,
 }
@@ -570,7 +527,7 @@ fn get_mqueue() -> posixmq::PosixMq {
         .mode(0o777)
         .nonblocking()
         .capacity(3)
-        .max_msg_len(32)
+        .max_msg_len(256)
         .create()
         .open("/cpu-throttle")
         .unwrap();
@@ -583,17 +540,21 @@ fn get_mqueue() -> posixmq::PosixMq {
 }
 
 fn send_msg(msg: InterThreadMessage) {
-    MQUEUE.send(0, msg.to_string().as_bytes()).expect("Cannot send message");
+    MQUEUE.send(0, serde_json::to_string(&msg).unwrap().as_bytes()).expect("Cannot send message");
 }
 
 fn receive_msg() -> Option<InterThreadMessage> {
     if MQUEUE.attributes().unwrap().current_messages == 0 {
-        return None;
-    }
-    let mut msg_buffer = [0_u8; 32];
-    match MQUEUE.recv(&mut msg_buffer) {
-        Ok(_) => Some(from_utf8(&msg_buffer).unwrap().parse().unwrap()),
-        Err(_) => None,
+        None
+    } else {
+        let mut msg_buffer = [0_u8; 256];
+        MQUEUE.recv(&mut msg_buffer).unwrap();
+        Some(
+            serde_json::from_str::<InterThreadMessage>(
+                from_utf8(&msg_buffer).unwrap().trim_end_matches('\0'),
+            )
+            .unwrap(),
+        )
     }
 }
 
