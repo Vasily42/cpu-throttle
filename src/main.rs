@@ -629,7 +629,14 @@ fn write_config(config: JsonConfig) -> Result<(), std::io::Error> {
 fn already_run() -> bool {
     let mut pgrep = Command::new("pgrep");
     pgrep.arg("cpu-throttle");
-    let output = pgrep.output().unwrap().stdout;
+    let output = pgrep
+        .output()
+        .inspect_err(|_| {
+            eprintln!("Fatal: pgrep (procps) not installed");
+            std::process::exit(1);
+        })
+        .unwrap()
+        .stdout;
     let output_str = from_utf8(&output).unwrap();
     let lines: Vec<&str> = output_str.split('\n').collect();
 
