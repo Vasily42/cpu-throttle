@@ -34,7 +34,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::Path,
     process::Command,
-    str::{from_utf8, FromStr},
+    str::from_utf8,
     sync::{
         atomic::{
             AtomicBool, AtomicI32,
@@ -45,17 +45,6 @@ use std::{
 };
 
 const CONFIG_DIR: &str = "/etc/cpu-throttle";
-const DEFAULT_MIN_MULTIPLIER: u16 = 5;
-const DEFAULT_MAX_MULTIPLIER: u16 = 150;
-const DEFAULT_FULL_THROTTLE_MIN_TIME_MS: i32 = 1000;
-const DEFAULT_MAX_DESCENT_VELOCITY: f64 = 2.0;
-const DEFAULT_MIN_DISCRT_PERIOD_MS: u16 = 150;
-const DEFAULT_MAX_DISCRT_PERIOD_MS: u16 = 1500;
-const DEFAULT_THROTTLING_START_TIME_MS: u16 = 7000;
-const DEFAULT_THROTTLING_RELEASE_TIME_MS: u16 = 12000;
-const DEFAULT_CORE_IDLENESS_FACTOR_MS: u16 = 1000;
-const DEFAULT_IDLE_THRESHOLD: f64 = 0.1;
-
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 #[serde(default)]
@@ -79,16 +68,16 @@ impl Default for JsonConfig {
     fn default() -> Self {
         JsonConfig {
             min_freq: *MIN_CPU_FREQ,
-            min_multiplier: DEFAULT_MIN_MULTIPLIER,
-            max_multiplier: DEFAULT_MAX_MULTIPLIER,
-            full_throttle_min_time_ms: DEFAULT_FULL_THROTTLE_MIN_TIME_MS,
-            max_descent_velocity: DEFAULT_MAX_DESCENT_VELOCITY,
-            min_period_ms: DEFAULT_MIN_DISCRT_PERIOD_MS,
-            max_period_ms: DEFAULT_MAX_DISCRT_PERIOD_MS,
-            start_time_ms: DEFAULT_THROTTLING_START_TIME_MS,
-            release_time_ms: DEFAULT_THROTTLING_RELEASE_TIME_MS,
-            core_idleness_factor_ms: DEFAULT_CORE_IDLENESS_FACTOR_MS,
-            idle_threshold: DEFAULT_IDLE_THRESHOLD,
+            min_multiplier: 5,
+            max_multiplier: 150,
+            full_throttle_min_time_ms: 1000,
+            max_descent_velocity: 2.0,
+            min_period_ms: 150,
+            max_period_ms: 1500,
+            start_time_ms: 7000,
+            release_time_ms: 12000,
+            core_idleness_factor_ms: 1000,
+            idle_threshold: 0.1,
             has_idle: true,
             multicore_limiter_allowed: true,
         }
@@ -586,18 +575,17 @@ fn switch_config(name: String) -> Result<(), ()> {
     Ok(())
 }
 
-fn read_config() -> Result<JsonConfig, ()> {
-    let bytes_json = std::fs::read(CONFIG_DIR.to_owned() + "/config.json").unwrap();
-    let json = serde_json::from_str::<JsonConfig>(from_utf8(&bytes_json).unwrap());
-    json.map_err(|_| ())
+fn read_config() -> Result<JsonConfig, Box<dyn std::error::Error>> {
+    let bytes_json = std::fs::read(CONFIG_DIR.to_owned() + "/config.json")?;
+    let json = serde_json::from_str::<JsonConfig>(from_utf8(&bytes_json)?)?;
+    Ok(json)
 }
 
-fn write_config(config: JsonConfig) {
-    let mut config_file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(CONFIG_DIR.to_owned() + "/config.json")
-        .unwrap();
-    config_file.write(serde_json::to_string_pretty(&config).unwrap().as_bytes()).unwrap();
+fn write_config(config: JsonConfig) -> Result<(), std::io::Error> {
+    let mut config_file =
+        std::fs::OpenOptions::new().write(true).open(CONFIG_DIR.to_owned() + "/config.json")?;
+    config_file.write(serde_json::to_string_pretty(&config).unwrap().as_bytes())?;
+    Ok(())
 }
 
 fn already_run() -> bool {
