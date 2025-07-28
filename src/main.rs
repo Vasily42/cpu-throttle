@@ -300,11 +300,7 @@ struct UniformFrequencyLimiter;
 impl FrequencyLimiter for UniformFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
         for i in 0..*N_CPUS {
-            std::fs::write(
-                format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                freq.to_string(),
-            )
-            .expect("Cannot write to /sys");
+            write_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i), freq);
         }
     }
 }
@@ -337,17 +333,15 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
             }
 
             if self.cpu_idleness[i] >= self.core_idleness_factor_ms {
-                std::fs::write(
-                    format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                    (*MAX_CPU_FREQ).to_string(),
-                )
-                .expect("Cannot write to /sys");
+                write_i32(
+                    &format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
+                    *MAX_CPU_FREQ,
+                );
             } else {
-                std::fs::write(
-                    format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                    freq.to_string(),
-                )
-                .expect("Cannot write to /sys");
+                write_i32(
+                    &format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
+                    freq,
+                );
             }
         }
     }
@@ -451,7 +445,7 @@ fn main() -> Result<(), i32> {
         Ok(config) => config,
         Err(_) => {
             let default_config = JsonConfig::default();
-            write_config(default_config);
+            write_config(default_config).unwrap();
             default_config
         }
     };
@@ -561,12 +555,47 @@ fn get_temp() -> i32 {
 }
 
 fn read_i32(path: &str) -> i32 {
-    let data = std::fs::read(path).expect(&format!("Cannot read from {}", path));
+    let mut attempts = 0;
+    let mut interval = 250;
+    let data = loop {
+        match std::fs::read(path) {
+            Ok(data) => break data,
+            Err(_) => {
+                attempts += 1;
+                if attempts == 4 {
+                    eprintln!("lost access to {path}");
+                    std::process::exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(interval));
+                interval *= 2;
+                continue;
+            }
+        }
+    };
     let int_str = from_utf8(&data).unwrap();
     let trimmed = int_str.trim();
     let value = trimmed.parse().unwrap();
-
     value
+}
+
+fn write_i32(path: &str, value: i32) {
+    let mut attempts = 0;
+    let mut interval = 250;
+    loop {
+        match std::fs::write(path, value.to_string()) {
+            Ok(()) => break,
+            Err(_) => {
+                attempts += 1;
+                if attempts == 4 {
+                    eprintln!("lost access to {path}");
+                    std::process::exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(interval));
+                interval *= 2;
+                continue;
+            }
+        }
+    }
 }
 
 fn switch_config(name: String) -> Result<(), ()> {
