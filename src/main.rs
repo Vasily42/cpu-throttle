@@ -70,7 +70,7 @@ impl Default for JsonConfig {
             min_freq: *MIN_CPU_FREQ,
             min_multiplier: 5,
             max_multiplier: 150,
-            full_throttle_min_time_ms: 1000,
+            full_throttle_min_time_ms: 4000,
             max_descent_velocity: 2.0,
             min_period_ms: 150,
             max_period_ms: 1500,
