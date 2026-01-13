@@ -133,9 +133,7 @@ impl ThrottlingAlgo {
             {
                 self.overall_restlessness +=
                     DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.start_time_ms as f64;
-                if self.overall_restlessness > 1.0 {
-                    self.overall_restlessness = 1.0;
-                }
+                self.overall_restlessness = self.overall_restlessness.min(1.0);
             } else if self.curr_freq == *MAX_CPU_FREQ {
                 self.overall_restlessness *= (0.1_f64).powf(
                     DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_time_ms as f64,
@@ -213,7 +211,7 @@ struct PDController {
     temp_velocity_err: f64,
     temp_velocity_err_integral: f64,
     max_descent_velocity: f64,
-    dynamic_multiplier_real: f64,
+    dynamic_multiplier_raw: f64,
     dynamic_multiplier_smoothed: f64,
     smoothing_coeff: f64,
     min_multiplier: f64,
@@ -234,7 +232,7 @@ impl PDController {
             temp_velocity_err: 0.0,
             temp_velocity_err_integral: 0.0,
             max_descent_velocity: config.max_descent_velocity,
-            dynamic_multiplier_real: 1.0,
+            dynamic_multiplier_raw: 1.0,
             dynamic_multiplier_smoothed: 1.0,
             smoothing_coeff: 1.0 - 2.0 / (smoothing_period + 1.0),
             min_multiplier: config.min_multiplier as f64,
