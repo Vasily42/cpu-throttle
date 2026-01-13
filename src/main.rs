@@ -209,7 +209,7 @@ struct PDController {
     target_t: i32,
     prev_t: i32,
     temp_velocity_err: f64,
-    temp_velocity_err_integral: f64,
+    temp_velocity_err_accel: f64,
     max_descent_velocity: f64,
     dynamic_multiplier_raw: f64,
     dynamic_multiplier_smoothed: f64,
@@ -230,7 +230,7 @@ impl PDController {
             target_t,
             prev_t: get_temp(),
             temp_velocity_err: 0.0,
-            temp_velocity_err_integral: 0.0,
+            temp_velocity_err_accel: 0.0,
             max_descent_velocity: config.max_descent_velocity,
             dynamic_multiplier_raw: 1.0,
             dynamic_multiplier_smoothed: 1.0,
@@ -261,29 +261,23 @@ impl PDController {
         let prev_err = self.temp_velocity_err;
 
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
-        self.temp_velocity_err_integral += 0.1 * self.temp_velocity_err;
-        self.temp_velocity_err_integral = self
-            .temp_velocity_err_integral
-            .clamp(-temp_velocity.abs(), temp_velocity.abs())
-            .clamp(-self.max_descent_velocity, self.max_descent_velocity);
+        self.temp_velocity_err_accel = self.temp_velocity_err - prev_err;
 
-        if self.temp_velocity_err.abs() > 0.5
-            && prev_err.signum() != -self.temp_velocity_err.signum()
+        self.dynamic_multiplier_raw *= if self.temp_velocity_err.signum()
+            != (self.temp_velocity_err + self.temp_velocity_err_accel).signum()
         {
-            self.dynamic_multiplier_real *= self.accel_m;
+            self.decel_m
         } else {
-            self.dynamic_multiplier_real *= self.decel_m;
-        }
+            self.accel_m
+        };
 
-        self.dynamic_multiplier_real =
-            self.dynamic_multiplier_real.clamp(self.min_multiplier, self.max_multiplier);
+        self.dynamic_multiplier_raw =
+            self.dynamic_multiplier_raw.clamp(self.min_multiplier, self.max_multiplier);
 
         self.dynamic_multiplier_smoothed = self.smoothing_coeff * self.dynamic_multiplier_smoothed
-            + (1.0 - self.smoothing_coeff) * self.dynamic_multiplier_real;
+            + (1.0 - self.smoothing_coeff) * self.dynamic_multiplier_raw;
 
-        let grad = self.dynamic_multiplier_smoothed
-            * 1000.0
-            * (self.temp_velocity_err + 0.33 * self.temp_velocity_err_integral);
+        let grad = self.dynamic_multiplier_smoothed * 1000.0 * (self.temp_velocity_err);
 
         grad as i32
     }
