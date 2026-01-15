@@ -200,7 +200,6 @@ struct PDController {
     target_t: i32,
     prev_t: i32,
     temp_velocity_err: f64,
-    temp_velocity_err_accel: f64,
     max_descent_velocity: f64,
     dynamic_multiplier_raw: f64,
     dynamic_multiplier_smoothed: f64,
@@ -221,7 +220,6 @@ impl PDController {
             target_t,
             prev_t: get_temp(),
             temp_velocity_err: 0.0,
-            temp_velocity_err_accel: 0.0,
             max_descent_velocity: config.max_descent_velocity,
             dynamic_multiplier_raw: 1.0,
             dynamic_multiplier_smoothed: 1.0,
@@ -242,20 +240,13 @@ impl PDController {
         let temp_velocity = dt as f64 / DISCRT_PERIOD_MS.load(Relaxed) as f64;
 
         let proportional_temp_diff = (current_t - self.target_t) as f64 / 1000.0;
-        let target_temp_velocity_curve = if proportional_temp_diff > 0.0 {
-            self.max_descent_velocity
-                * ((-proportional_temp_diff / self.max_descent_velocity).exp() - 1.0)
-        } else {
-            -proportional_temp_diff
-        };
+        let target_temp_velocity_curve = (-proportional_temp_diff).max(-self.max_descent_velocity);
 
         let prev_err = self.temp_velocity_err;
-
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
-        self.temp_velocity_err_accel = self.temp_velocity_err - prev_err;
 
         self.dynamic_multiplier_raw *= if self.temp_velocity_err.signum()
-            != (self.temp_velocity_err + self.temp_velocity_err_accel).signum()
+            != prev_err.signum()
         {
             self.decel_m
         } else {
