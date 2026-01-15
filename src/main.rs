@@ -357,14 +357,6 @@ struct Args {
 }
 
 fn main() -> Result<(), i32> {
-    if Path::new("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies")
-        .try_exists()
-        .unwrap()
-    {
-        eprintln!("The CPU probably doesn't support fine-grained frequency scaling");
-        return Err(1);
-    }
-
     let args = Args::parse();
 
     let target_temperature: i32 = if already_run() {
