@@ -15,15 +15,6 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-extern crate clap;
-extern crate ctrlc;
-extern crate is_superuser;
-extern crate nix;
-extern crate num_cpus;
-extern crate posixmq;
-extern crate serde;
-extern crate serde_json;
-
 use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
 use serde::{Deserialize, Serialize};
