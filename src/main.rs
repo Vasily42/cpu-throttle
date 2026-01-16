@@ -19,11 +19,11 @@ use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::Permissions,
+    fs::{self, Permissions},
     i32,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     str::from_utf8,
     sync::{
@@ -177,22 +177,34 @@ static MIN_CPU_FREQ: LazyLock<i32> =
     LazyLock::new(|| read_i32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"));
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
-    let mut find_cmd_output = Command::new("find")
-        .args(["/sys", "-name", "temp*_input"])
-        .output()
-        .expect("Error on find command")
-        .stdout;
-
-    let mut temper_file_list: Vec<(&str, i32)> = std::str::from_utf8_mut(&mut find_cmd_output)
-        .unwrap()
-        .split("\n")
-        .filter(|s| !s.is_empty())
-        .map(|s| (s, read_i32(s)))
+    let names: Vec<PathBuf> = fs::read_dir("/sys/class/hwmon")
+        .expect("cannot read /sys/class/hwmon")
+        .flatten()
+        .map(|e| e.path())
         .collect();
 
-    temper_file_list.sort_by_key(|pair| pair.1);
+    let temp_file_list: Vec<String> = names
+        .into_iter()
+        .map(|s| (s.clone(), std::fs::read_to_string(s.join("name")).unwrap().trim().to_owned()))
+        .filter(|(k, v)| {
+            *v == "coretemp" || *v == "k10temp" || *v == "zenpower" || *v == "amd_energy"
+        })
+        .filter_map(|(k, v)| {
+            for entry in fs::read_dir(k).unwrap().flatten() {
+                let path = entry.path();
+                let filename = path.file_name().unwrap().to_str().unwrap();
+                if filename.starts_with("temp") && filename.ends_with("label") {
+                    let label = fs::read_to_string(&path).unwrap().trim().to_owned();
+                    if ["Package", "Tdie", "Tctl"].iter().any(|p| label.contains(p)) {
+                        return Some(path.to_str().unwrap().replace("label", "input").clone());
+                    }
+                }
+            }
+            None
+        })
+        .collect();
 
-    temper_file_list.last().expect("There are no hwmon files").0.to_string()
+    temp_file_list.last().unwrap().to_string()
 });
 
 static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
