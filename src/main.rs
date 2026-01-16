@@ -390,11 +390,12 @@ fn main() -> Result<(), i32> {
         }
     };
 
-    let mut target_t = target_temperature * 1000;
-
-    if is_superuser() {
+    if !is_superuser() {
         eprintln!("Run with sudo!");
+        return Err(1);
     }
+
+    let mut target_t = target_temperature * 1000;
 
     if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/default.json")).exists() {
         std::process::Command::new("mkdir")
