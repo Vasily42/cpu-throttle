@@ -392,7 +392,7 @@ fn main() -> Result<(), i32> {
 
     let mut target_t = target_temperature * 1000;
 
-    if !is_superuser::is_superuser() {
+    if is_superuser() {
         eprintln!("Run with sudo!");
     }
 
@@ -504,7 +504,7 @@ fn get_mqueue() -> posixmq::PosixMq {
         .open("/cpu-throttle")
         .unwrap();
 
-    if is_superuser::is_superuser() {
+    if is_superuser() {
         std::fs::set_permissions("/dev/mqueue/cpu-throttle", Permissions::from_mode(0o777))
             .expect("Cannot set permissions");
     }
@@ -580,7 +580,7 @@ fn write_i32(path: &str, value: i32) {
 
 fn switch_config(name: String) -> Result<(), ()> {
     if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/" + &name + ".json")).exists()
-        || !is_superuser::is_superuser()
+        || !is_superuser()
     {
         return Err(());
     }
@@ -604,6 +604,10 @@ fn write_config(config: JsonConfig) -> Result<(), std::io::Error> {
         std::fs::OpenOptions::new().write(true).open(CONFIG_DIR.to_owned() + "/config.json")?;
     config_file.write(serde_json::to_string_pretty(&config).unwrap().as_bytes())?;
     Ok(())
+}
+
+fn is_superuser() -> bool {
+    nix::unistd::Uid::effective().is_root()
 }
 
 fn already_run() -> bool {
