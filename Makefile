@@ -20,6 +20,8 @@ install: $(TARGET)
 	mkdir -p $(DESTDIR)/usr/share/zsh/site-functions
 	install -m644 -o root -g root misc/zsh-completion.sh $(DESTDIR)/usr/share/zsh/site-functions/_cpu-throttle
 	mkdir -p $(DESTDIR)/etc/cpu-throttle/profiles/
+	rm -f $(DESTDIR)/etc/cpu-throttle/config.json
+	rm -f $(DESTDIR)/etc/cpu-throttle/profiles/*
 	install -m644 -o root -g root misc/profiles/* $(DESTDIR)/etc/cpu-throttle/profiles/
 
 uninstall:
