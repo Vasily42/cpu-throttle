@@ -5,9 +5,8 @@
   "max_descent_velocity": 1.5,
   "min_period_ms": 500,
   "max_period_ms": 5000,
-  "start_time_ms": 20000,
-  "release_time_ms": 35000,
-  "idle_threshold": 0.8,
-  "has_idle": true,
+  "start_lag_time_ms": 20000,
+  "release_lag_time_ms": 35000,
+  "has_lag": true,
   "multicore_limiter_allowed": true
 }

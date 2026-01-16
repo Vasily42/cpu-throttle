@@ -47,11 +47,10 @@ struct JsonConfig {
     max_descent_velocity: f64,
     min_period_ms: u16,
     max_period_ms: u16,
-    start_time_ms: u16,
-    release_time_ms: u16,
+    start_lag_time_ms: u16,
+    release_lag_time_ms: u16,
     core_idleness_factor_ms: u16,
-    idle_threshold: f64,
-    has_idle: bool,
+    has_lag: bool,
     multicore_limiter_allowed: bool,
 }
 
@@ -65,11 +64,10 @@ impl Default for JsonConfig {
             max_descent_velocity: 2.0,
             min_period_ms: 150,
             max_period_ms: 1500,
-            start_time_ms: 7000,
-            release_time_ms: 12000,
+            start_lag_time_ms: 7000,
+            release_lag_time_ms: 12000,
             core_idleness_factor_ms: 1000,
-            idle_threshold: 0.1,
-            has_idle: true,
+            has_lag: true,
             multicore_limiter_allowed: true,
         }
     }
@@ -79,8 +77,8 @@ struct ThrottlingAlgo {
     config: JsonConfig,
     pd_ctl: PDController,
     limiter: Box<dyn FrequencyLimiter>,
+    active: bool,
     overall_restlessness: f64,
-    overall_restlessness_threshold: f64,
     curr_freq: i32,
     max_step_down: i32,
 }
@@ -105,8 +103,8 @@ impl ThrottlingAlgo {
             config,
             pd_ctl: pd,
             limiter,
+            active: false,
             overall_restlessness: 0.0,
-            overall_restlessness_threshold: 1.0 - config.idle_threshold,
             curr_freq: *MAX_CPU_FREQ,
             max_step_down: (*MAX_CPU_FREQ - *MIN_CPU_FREQ)
                 / (config.full_throttle_min_time_ms / config.min_period_ms as i32).max(1),
@@ -118,46 +116,52 @@ impl ThrottlingAlgo {
         let delta_freq = self.pd_ctl.get_delta_freq(actual_t);
         let new_dscrt_period;
 
-        if self.config.has_idle {
-            if delta_freq > 0 && actual_t > self.pd_ctl.target_t - 5000
-                || self.curr_freq != *MAX_CPU_FREQ
-            {
+        let warmup = delta_freq > 0 && actual_t > self.pd_ctl.target_t - 5000
+            || self.curr_freq != *MAX_CPU_FREQ;
+
+        if self.config.has_lag {
+            if warmup {
                 self.overall_restlessness +=
-                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.start_time_ms as f64;
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.start_lag_time_ms as f64;
                 self.overall_restlessness = self.overall_restlessness.min(1.0);
             } else if self.curr_freq == *MAX_CPU_FREQ {
-                self.overall_restlessness *= (0.1_f64).powf(
-                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_time_ms as f64,
-                );
-                if self.overall_restlessness < 0.01 {
-                    self.overall_restlessness = 0.0;
-                }
+                self.overall_restlessness -=
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_lag_time_ms as f64;
+                self.overall_restlessness = self.overall_restlessness.max(0.0);
             }
 
-            if self.overall_restlessness >= self.overall_restlessness_threshold {
-                self.curr_freq -= delta_freq.min(self.max_step_down);
-                self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
+            if self.overall_restlessness == 1.0 {
+                self.active = true;
+            }
+            if self.overall_restlessness == 0.0 {
+                self.active = false;
+            }
 
-                self.limiter.limit_freq(self.curr_freq);
+            if warmup {
+                new_dscrt_period = (self.config.min_period_ms as i32
+                    + ((self.config.max_period_ms - self.config.min_period_ms) as f64
+                        * (1.0 - self.overall_restlessness)) as i32)
+                    .min(DISCRT_PERIOD_MS.load(Relaxed));
             } else {
-                if self.curr_freq != *MAX_CPU_FREQ {
-                    self.curr_freq = *MAX_CPU_FREQ;
-                    self.limiter.limit_freq(*MAX_CPU_FREQ);
+                new_dscrt_period = if self.overall_restlessness == 0.0 {
+                    self.config.max_period_ms as i32
+                } else {
+                    DISCRT_PERIOD_MS.load(Relaxed)
                 }
-                self.pd_ctl.prev_t = actual_t;
             }
-
-            new_dscrt_period = self.config.min_period_ms as i32
-                + ((self.config.max_period_ms - self.config.min_period_ms) as f64
-                    * (1.0 - self.overall_restlessness)) as i32;
         } else {
-            if self.curr_freq < *MAX_CPU_FREQ || delta_freq > 0 {
-                self.curr_freq -= delta_freq.min(self.max_step_down);
-                self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
-
-                self.limiter.limit_freq(self.curr_freq);
+            self.active = warmup;
+            if warmup {
+                new_dscrt_period = self.config.min_period_ms as i32;
+            } else {
+                new_dscrt_period = self.config.max_period_ms as i32;
             }
-            new_dscrt_period = self.config.min_period_ms as i32;
+        }
+
+        if self.active {
+            self.curr_freq -= delta_freq.min(self.max_step_down);
+            self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
+            self.limiter.limit_freq(self.curr_freq);
         }
 
         new_dscrt_period
@@ -245,9 +249,7 @@ impl PDController {
         let prev_err = self.temp_velocity_err;
         self.temp_velocity_err = temp_velocity - target_temp_velocity_curve;
 
-        self.dynamic_multiplier_raw *= if self.temp_velocity_err.signum()
-            != prev_err.signum()
-        {
+        self.dynamic_multiplier_raw *= if self.temp_velocity_err.signum() != prev_err.signum() {
             self.decel_m
         } else {
             self.accel_m

@@ -5,6 +5,6 @@
   "max_descent_velocity": 5.0,
   "min_period_ms": 100,
   "max_period_ms": 300,
-  "has_idle": false,
+  "has_lag": false,
   "multicore_limiter_allowed": false
 }
