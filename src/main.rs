@@ -573,16 +573,16 @@ fn get_temp() -> i32 {
     read_i32(&TEMPERATURE_PROVIDER_FILE)
 }
 
-fn read_i32(path: &str) -> i32 {
+fn read_i32(path: &PathBuf) -> i32 {
     let mut attempts = 0;
     let mut interval = 250;
     let data = loop {
-        match std::fs::read(path) {
+        match std::fs::read_to_string(path) {
             Ok(data) => break data,
             Err(_) => {
                 attempts += 1;
                 if attempts == 4 {
-                    eprintln!("lost access to {path}");
+                    eprintln!("lost access to {}", path.to_str().unwrap());
                     std::process::exit(1);
                 }
                 std::thread::sleep(Duration::from_millis(interval));
@@ -591,13 +591,12 @@ fn read_i32(path: &str) -> i32 {
             }
         }
     };
-    let int_str = from_utf8(&data).unwrap();
-    let trimmed = int_str.trim();
-    let value = trimmed.parse().unwrap();
+    let trimmed = data.trim();
+    let value = trimmed.parse().expect("cannot parse file content as i32");
     value
 }
 
-fn write_i32(path: &str, value: i32) {
+fn write_i32(path: &PathBuf, value: i32) {
     let mut attempts = 0;
     let mut interval = 250;
     loop {
@@ -606,7 +605,7 @@ fn write_i32(path: &str, value: i32) {
             Err(_) => {
                 attempts += 1;
                 if attempts == 4 {
-                    eprintln!("lost access to {path}");
+                    eprintln!("lost access to {}", path.to_str().unwrap());
                     std::process::exit(1);
                 }
                 std::thread::sleep(Duration::from_millis(interval));
