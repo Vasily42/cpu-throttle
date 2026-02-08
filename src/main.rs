@@ -189,35 +189,52 @@ static MAX_CPU_FREQ: LazyLock<i32> =
 static MIN_CPU_FREQ: LazyLock<i32> =
     LazyLock::new(|| read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_min_freq")));
 
-static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
-    let names: Vec<PathBuf> = fs::read_dir("/sys/class/hwmon")
+static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+    const HWMON_PATH: &str = "/sys/class/hwmon";
+    const TARGET_NAMES: &[&str] = &["coretemp", "k10temp", "zenpower", "amd_energy"];
+    const TARGET_LABELS: &[&str] = &["Package", "Tdie", "Tctl"];
+
+    let is_target_hwmon = |path: &PathBuf| {
+        fs::read_to_string(path.join("name"))
+            .ok()
+            .map_or(false, |name| TARGET_NAMES.contains(&name.trim()))
+    };
+
+    let is_temp_label = |path: &PathBuf| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map_or(false, |s| s.contains("temp") && s.contains("label"))
+    };
+
+    let has_target_label = |path: &PathBuf| {
+        fs::read_to_string(path)
+            .ok()
+            .map_or(false, |content| {
+                let label = content.trim();
+                TARGET_LABELS.iter().any(|&target| label.starts_with(target))
+            })
+    };
+
+    let to_input_path = |path: PathBuf| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| path.with_file_name(name.replace("label", "input")))
+    };
+
+    fs::read_dir(HWMON_PATH)
         .expect("cannot read /sys/class/hwmon")
-        .flatten()
+        .filter_map(Result::ok)
         .map(|e| e.path())
-        .collect();
-
-    let temp_file_list: Vec<String> = names
-        .into_iter()
-        .map(|s| (s.clone(), std::fs::read_to_string(s.join("name")).unwrap().trim().to_owned()))
-        .filter(|(k, v)| {
-            *v == "coretemp" || *v == "k10temp" || *v == "zenpower" || *v == "amd_energy"
+        .filter(is_target_hwmon)
+        .flat_map(|dir| {
+            fs::read_dir(&dir)
+                .expect("cannot read hwmon directory")
+                .filter_map(Result::ok)
+                .map(|e| e.path())
         })
-        .filter_map(|(k, v)| {
-            for entry in fs::read_dir(k).unwrap().flatten() {
-                let path = entry.path();
-                let filename = path.file_name().unwrap().to_str().unwrap();
-                if filename.starts_with("temp") && filename.ends_with("label") {
-                    let label = fs::read_to_string(&path).unwrap().trim().to_owned();
-                    if ["Package", "Tdie", "Tctl"].iter().any(|p| label.contains(p)) {
-                        return Some(path.to_str().unwrap().replace("label", "input").clone());
-                    }
-                }
-            }
-            None
-        })
-        .collect();
-
-    temp_file_list.last().unwrap().to_string()
+        .filter(|p| p.is_file() && is_temp_label(p) && has_target_label(p))
+        .find_map(to_input_path)
+        .expect("sensor files have not been found")
 });
 
 static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
