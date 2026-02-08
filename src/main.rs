@@ -19,19 +19,18 @@ use clap::{Parser, Subcommand};
 use core::{f64, time::Duration};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, Permissions},
+    fs::{self, File, Permissions},
     i32,
-    io::Write,
+    io::{Read, Seek, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     str::from_utf8,
     sync::{
-        atomic::{
+        Arc, LazyLock, atomic::{
             AtomicBool, AtomicI32,
             Ordering::{self, *},
-        },
-        Arc, LazyLock,
+        }
     },
 };
 
@@ -87,8 +86,8 @@ impl ThrottlingAlgo {
     fn new(target_t: i32, config: JsonConfig) -> Self {
         let pd = PDController::new(target_t, config);
         let mut limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
-            match *N_CPUS {
-                1 => Box::new(UniformFrequencyLimiter),
+            match CPU_PATHS.len() {
+                1 => Box::new(UniformFrequencyLimiter::new()),
                 2.. => Box::new(MulticoreFrequencyLimiter::new(config.core_idleness_factor_ms)),
                 _ => {
                     eprintln!("wtf");
@@ -96,7 +95,7 @@ impl ThrottlingAlgo {
                 }
             }
         } else {
-            Box::new(UniformFrequencyLimiter)
+            Box::new(UniformFrequencyLimiter::new())
         };
         limiter.limit_freq(*MAX_CPU_FREQ);
         Self {
@@ -168,13 +167,27 @@ impl ThrottlingAlgo {
     }
 }
 
-static N_CPUS: LazyLock<i32> = LazyLock::new(|| num_cpus::get() as i32);
+static CPU_PATHS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
+    fs::read_dir("/sys/devices/system/cpu")
+        .expect("cannot read /sys/devices/system/cpu")
+        .flatten()
+        .filter_map(|e| e.path().is_dir().then(|| e.path()))
+        .filter_map(|path| {
+            path.file_name()
+                .filter(|f| {
+                    let s = f.to_str().unwrap();
+                    s.starts_with("cpu") && s.chars().any(|c| c.is_ascii_digit())
+                })
+                .and(Some(path.to_owned().join("cpufreq")))
+        })
+        .collect()
+});
 
 static MAX_CPU_FREQ: LazyLock<i32> =
-    LazyLock::new(|| read_i32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"));
+    LazyLock::new(|| read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_max_freq")));
 
 static MIN_CPU_FREQ: LazyLock<i32> =
-    LazyLock::new(|| read_i32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"));
+    LazyLock::new(|| read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_min_freq")));
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<String> = LazyLock::new(|| {
     let names: Vec<PathBuf> = fs::read_dir("/sys/class/hwmon")
@@ -283,17 +296,28 @@ trait FrequencyLimiter {
     fn limit_freq(&mut self, freq: i32);
 }
 
-struct UniformFrequencyLimiter;
+struct UniformFrequencyLimiter {
+    freq_ctl_files: Vec<File>
+}
+
+impl UniformFrequencyLimiter {
+    fn new() -> Self {
+        UniformFrequencyLimiter { freq_ctl_files: CPU_PATHS.iter().map(|path| fs::OpenOptions::new().write(true).open(path.join("scaling_max_freq")).expect("cannot open scaling_max_freq")).collect() }
+    }
+}
 
 impl FrequencyLimiter for UniformFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
-        for i in 0..*N_CPUS {
-            write_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i), freq);
+        for file in self.freq_ctl_files.iter_mut() {
+            fs::File::seek(file, std::io::SeekFrom::Start(0)).expect("cannot seek scaling_max_freq"); 
+            write!(file, "{}", freq).expect("cannot write scaling_max_freq");
         }
     }
 }
 
 struct MulticoreFrequencyLimiter {
+    freq_ctl_files: Vec<File>,
+    freq_check_files: Vec<File>,
     cpu_idleness: Vec<u16>,
     core_idleness_factor_ms: u16,
 }
@@ -301,7 +325,9 @@ struct MulticoreFrequencyLimiter {
 impl MulticoreFrequencyLimiter {
     fn new(core_idleness_factor_ms: u16) -> Self {
         MulticoreFrequencyLimiter {
-            cpu_idleness: vec![core_idleness_factor_ms; *N_CPUS as usize],
+            freq_ctl_files: CPU_PATHS.iter().map(|path| fs::OpenOptions::new().write(true).open(path.join("scaling_max_freq")).expect("cannot open scaling_max_freq")).collect(),
+            freq_check_files: CPU_PATHS.iter().map(|path| fs::OpenOptions::new().read(true).open(path.join("scaling_cur_freq")).expect("cannot open scaling_cur_freq")).collect(),
+            cpu_idleness: vec![core_idleness_factor_ms; CPU_PATHS.len()],
             core_idleness_factor_ms,
         }
     }
@@ -309,28 +335,23 @@ impl MulticoreFrequencyLimiter {
 
 impl FrequencyLimiter for MulticoreFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
-        for i in 0..(*N_CPUS as usize) {
-            let curr_freq =
-                read_i32(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i));
+        for ((ctl_file, check_file), idleness) in self.freq_ctl_files.iter_mut().zip(self.freq_check_files.iter_mut()).zip(self.cpu_idleness.iter_mut()) {
+            let curr_freq: i32 = {
+                fs::File::seek(check_file, std::io::SeekFrom::Start(0)).expect("cannot seek scaling_cur_freq"); 
+                let mut content = String::new();
+                check_file.read_to_string(&mut content).expect("cannot read scaling_cur_freq");
+                content.trim().parse().expect("scaling_cur_freq gave not an i32")
+            };
 
             if curr_freq > *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.8) as i32 {
-                self.cpu_idleness[i] = 0
+                *idleness = 0;
             } else if curr_freq <= *MIN_CPU_FREQ + ((freq - *MIN_CPU_FREQ) as f64 * 0.2) as i32 {
-                self.cpu_idleness[i] += DISCRT_PERIOD_MS.load(Relaxed) as u16;
-                self.cpu_idleness[i] = self.cpu_idleness[i].min(self.core_idleness_factor_ms);
+                *idleness += DISCRT_PERIOD_MS.load(Relaxed) as u16;
+                *idleness = (*idleness).min(self.core_idleness_factor_ms);
             }
 
-            if self.cpu_idleness[i] >= self.core_idleness_factor_ms {
-                write_i32(
-                    &format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                    *MAX_CPU_FREQ,
-                );
-            } else {
-                write_i32(
-                    &format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i),
-                    freq,
-                );
-            }
+            fs::File::seek(ctl_file, std::io::SeekFrom::Start(0)).expect("cannot seek scaling_max_freq");
+            write!(ctl_file, "{}", if *idleness >= self.core_idleness_factor_ms {*MAX_CPU_FREQ} else {freq}).expect("cannot write scaling_max_freq");
         }
     }
 }
