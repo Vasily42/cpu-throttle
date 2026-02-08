@@ -27,10 +27,11 @@ use std::{
     process::Command,
     str::from_utf8,
     sync::{
-        Arc, LazyLock, atomic::{
+        atomic::{
             AtomicBool, AtomicI32,
             Ordering::{self, *},
-        }
+        },
+        Arc, LazyLock,
     },
 };
 
@@ -183,11 +184,13 @@ static CPU_PATHS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
         .collect()
 });
 
-static MAX_CPU_FREQ: LazyLock<i32> =
-    LazyLock::new(|| read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_max_freq")));
+static MAX_CPU_FREQ: LazyLock<i32> = LazyLock::new(|| {
+    read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_max_freq"))
+});
 
-static MIN_CPU_FREQ: LazyLock<i32> =
-    LazyLock::new(|| read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_min_freq")));
+static MIN_CPU_FREQ: LazyLock<i32> = LazyLock::new(|| {
+    read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_min_freq"))
+});
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     const HWMON_PATH: &str = "/sys/class/hwmon";
@@ -207,12 +210,10 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     };
 
     let has_target_label = |path: &PathBuf| {
-        fs::read_to_string(path)
-            .ok()
-            .map_or(false, |content| {
-                let label = content.trim();
-                TARGET_LABELS.iter().any(|&target| label.starts_with(target))
-            })
+        fs::read_to_string(path).ok().map_or(false, |content| {
+            let label = content.trim();
+            TARGET_LABELS.iter().any(|&target| label.starts_with(target))
+        })
     };
 
     let to_input_path = |path: PathBuf| {
@@ -314,19 +315,30 @@ trait FrequencyLimiter {
 }
 
 struct UniformFrequencyLimiter {
-    freq_ctl_files: Vec<File>
+    freq_ctl_files: Vec<File>,
 }
 
 impl UniformFrequencyLimiter {
     fn new() -> Self {
-        UniformFrequencyLimiter { freq_ctl_files: CPU_PATHS.iter().map(|path| fs::OpenOptions::new().write(true).open(path.join("scaling_max_freq")).expect("cannot open scaling_max_freq")).collect() }
+        UniformFrequencyLimiter {
+            freq_ctl_files: CPU_PATHS
+                .iter()
+                .map(|path| {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(path.join("scaling_max_freq"))
+                        .expect("cannot open scaling_max_freq")
+                })
+                .collect(),
+        }
     }
 }
-
+read_i32
 impl FrequencyLimiter for UniformFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
         for file in self.freq_ctl_files.iter_mut() {
-            fs::File::seek(file, std::io::SeekFrom::Start(0)).expect("cannot seek scaling_max_freq"); 
+            fs::File::seek(file, std::io::SeekFrom::Start(0))
+                .expect("cannot seek scaling_max_freq");
             write!(file, "{}", freq).expect("cannot write scaling_max_freq");
         }
     }
@@ -342,8 +354,24 @@ struct MulticoreFrequencyLimiter {
 impl MulticoreFrequencyLimiter {
     fn new(core_idleness_factor_ms: u16) -> Self {
         MulticoreFrequencyLimiter {
-            freq_ctl_files: CPU_PATHS.iter().map(|path| fs::OpenOptions::new().write(true).open(path.join("scaling_max_freq")).expect("cannot open scaling_max_freq")).collect(),
-            freq_check_files: CPU_PATHS.iter().map(|path| fs::OpenOptions::new().read(true).open(path.join("scaling_cur_freq")).expect("cannot open scaling_cur_freq")).collect(),
+            freq_ctl_files: CPU_PATHS
+                .iter()
+                .map(|path| {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(path.join("scaling_max_freq"))
+                        .expect("cannot open scaling_max_freq")
+                })
+                .collect(),
+            freq_check_files: CPU_PATHS
+                .iter()
+                .map(|path| {
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .open(path.join("scaling_cur_freq"))
+                        .expect("cannot open scaling_cur_freq")
+                })
+                .collect(),
             cpu_idleness: vec![core_idleness_factor_ms; CPU_PATHS.len()],
             core_idleness_factor_ms,
         }
@@ -352,9 +380,15 @@ impl MulticoreFrequencyLimiter {
 
 impl FrequencyLimiter for MulticoreFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
-        for ((ctl_file, check_file), idleness) in self.freq_ctl_files.iter_mut().zip(self.freq_check_files.iter_mut()).zip(self.cpu_idleness.iter_mut()) {
+        for ((ctl_file, check_file), idleness) in self
+            .freq_ctl_files
+            .iter_mut()
+            .zip(self.freq_check_files.iter_mut())
+            .zip(self.cpu_idleness.iter_mut())
+        {
             let curr_freq: i32 = {
-                fs::File::seek(check_file, std::io::SeekFrom::Start(0)).expect("cannot seek scaling_cur_freq"); 
+                fs::File::seek(check_file, std::io::SeekFrom::Start(0))
+                    .expect("cannot seek scaling_cur_freq");
                 let mut content = String::new();
                 check_file.read_to_string(&mut content).expect("cannot read scaling_cur_freq");
                 content.trim().parse().expect("scaling_cur_freq gave not an i32")
@@ -367,8 +401,14 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
                 *idleness = (*idleness).min(self.core_idleness_factor_ms);
             }
 
-            fs::File::seek(ctl_file, std::io::SeekFrom::Start(0)).expect("cannot seek scaling_max_freq");
-            write!(ctl_file, "{}", if *idleness >= self.core_idleness_factor_ms {*MAX_CPU_FREQ} else {freq}).expect("cannot write scaling_max_freq");
+            fs::File::seek(ctl_file, std::io::SeekFrom::Start(0))
+                .expect("cannot seek scaling_max_freq");
+            write!(
+                ctl_file,
+                "{}",
+                if *idleness >= self.core_idleness_factor_ms { *MAX_CPU_FREQ } else { freq }
+            )
+            .expect("cannot write scaling_max_freq");
         }
     }
 }
