@@ -15,182 +15,52 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use core::{f64, time::Duration};
+use core::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, Permissions},
-    i32,
+    fs::{self, File},
+    io,
     io::{Read, Seek, Write},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process,
     str::from_utf8,
     sync::{
         atomic::{
             AtomicBool, AtomicI32,
-            Ordering::{self, *},
+            Ordering::{Acquire, Relaxed, Release},
         },
         Arc, LazyLock,
     },
+    thread,
 };
 
-const CONFIG_DIR: &str = "/etc/cpu-throttle";
-
-#[derive(Serialize, Deserialize, Clone, Copy)]
-#[serde(default)]
-struct JsonConfig {
-    min_freq: i32,
-    min_multiplier: u16,
-    max_multiplier: u16,
-    full_throttle_min_time_ms: i32,
-    max_descent_velocity: f64,
-    min_period_ms: u16,
-    max_period_ms: u16,
-    start_lag_time_ms: u16,
-    release_lag_time_ms: u16,
-    core_idleness_factor_ms: u16,
-    has_lag: bool,
-    multicore_limiter_allowed: bool,
-}
-
-impl Default for JsonConfig {
-    fn default() -> Self {
-        JsonConfig {
-            min_freq: *MIN_CPU_FREQ,
-            min_multiplier: 5,
-            max_multiplier: 150,
-            full_throttle_min_time_ms: 4000,
-            max_descent_velocity: 2.0,
-            min_period_ms: 150,
-            max_period_ms: 1500,
-            start_lag_time_ms: 7000,
-            release_lag_time_ms: 12000,
-            core_idleness_factor_ms: 1000,
-            has_lag: true,
-            multicore_limiter_allowed: true,
-        }
-    }
-}
-
-struct ThrottlingAlgo {
-    config: JsonConfig,
-    pd_ctl: PDController,
-    limiter: Box<dyn FrequencyLimiter>,
-    active: bool,
-    overall_restlessness: f64,
-    curr_freq: i32,
-    max_step_down: i32,
-}
-
-impl ThrottlingAlgo {
-    fn new(target_t: i32, config: JsonConfig) -> Self {
-        let pd = PDController::new(target_t, config);
-        let mut limiter: Box<dyn FrequencyLimiter> = if config.multicore_limiter_allowed {
-            match CPU_PATHS.len() {
-                1 => Box::new(UniformFrequencyLimiter::new()),
-                2.. => Box::new(MulticoreFrequencyLimiter::new(config.core_idleness_factor_ms)),
-                _ => {
-                    eprintln!("wtf");
-                    panic!()
-                }
-            }
-        } else {
-            Box::new(UniformFrequencyLimiter::new())
-        };
-        limiter.limit_freq(*MAX_CPU_FREQ);
-        Self {
-            config,
-            pd_ctl: pd,
-            limiter,
-            active: false,
-            overall_restlessness: 0.0,
-            curr_freq: *MAX_CPU_FREQ,
-            max_step_down: (*MAX_CPU_FREQ - *MIN_CPU_FREQ)
-                / (config.full_throttle_min_time_ms / config.min_period_ms as i32).max(1),
-        }
-    }
-
-    fn step(&mut self) -> i32 {
-        let actual_t = get_temp();
-        let delta_freq = self.pd_ctl.get_delta_freq(actual_t);
-        let new_dscrt_period;
-
-        let warmup = delta_freq > 0 && actual_t > self.pd_ctl.target_t - 5000
-            || self.curr_freq != *MAX_CPU_FREQ;
-
-        if self.config.has_lag {
-            if warmup {
-                self.overall_restlessness +=
-                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.start_lag_time_ms as f64;
-                self.overall_restlessness = self.overall_restlessness.min(1.0);
-            } else if self.curr_freq == *MAX_CPU_FREQ {
-                self.overall_restlessness -=
-                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_lag_time_ms as f64;
-                self.overall_restlessness = self.overall_restlessness.max(0.0);
-            }
-
-            if self.overall_restlessness == 1.0 {
-                self.active = true;
-            }
-            if self.overall_restlessness == 0.0 {
-                self.active = false;
-            }
-
-            if warmup {
-                new_dscrt_period = (self.config.min_period_ms as i32
-                    + ((self.config.max_period_ms - self.config.min_period_ms) as f64
-                        * (1.0 - self.overall_restlessness)) as i32)
-                    .min(DISCRT_PERIOD_MS.load(Relaxed));
-            } else {
-                new_dscrt_period = if self.overall_restlessness == 0.0 {
-                    self.config.max_period_ms as i32
-                } else {
-                    DISCRT_PERIOD_MS.load(Relaxed)
-                }
-            }
-        } else {
-            self.active = warmup;
-            if warmup {
-                new_dscrt_period = self.config.min_period_ms as i32;
-            } else {
-                new_dscrt_period = self.config.max_period_ms as i32;
-            }
-        }
-
-        if self.active {
-            self.curr_freq -= delta_freq.min(self.max_step_down);
-            self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
-            self.limiter.limit_freq(self.curr_freq);
-        }
-
-        new_dscrt_period
-    }
-}
-
 static CPU_PATHS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
-    fs::read_dir("/sys/devices/system/cpu")
+    let paths: Vec<PathBuf> = fs::read_dir("/sys/devices/system/cpu")
         .expect("cannot read /sys/devices/system/cpu")
         .flatten()
-        .filter_map(|e| e.path().is_dir().then(|| e.path()))
+        .filter_map(|e| e.path().is_dir().then_some(e.path()))
         .filter_map(|path| {
             path.file_name()
                 .filter(|f| {
                     let s = f.to_str().unwrap();
                     s.starts_with("cpu") && s.chars().any(|c| c.is_ascii_digit())
                 })
-                .and(Some(path.to_owned().join("cpufreq")))
+                .and(Some(path.join("cpufreq")))
         })
-        .collect()
+        .collect();
+    if paths.is_empty() {
+        panic!("Cpu paths not found")
+    }
+    paths
 });
 
-static MAX_CPU_FREQ: LazyLock<i32> = LazyLock::new(|| {
-    read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_max_freq"))
-});
+static MAX_CPU_FREQ: LazyLock<i32> =
+    LazyLock::new(|| read_i32(&CPU_PATHS.first().unwrap().join("cpuinfo_max_freq")));
 
-static MIN_CPU_FREQ: LazyLock<i32> = LazyLock::new(|| {
-    read_i32(&CPU_PATHS.get(0).expect("There are no cpus").join("cpuinfo_min_freq"))
-});
+static MIN_CPU_FREQ: LazyLock<i32> =
+    LazyLock::new(|| read_i32(&CPU_PATHS.first().unwrap().join("cpuinfo_min_freq")));
 
 static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     const HWMON_PATH: &str = "/sys/class/hwmon";
@@ -198,19 +68,17 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     const TARGET_LABELS: &[&str] = &["Package", "Tdie", "Tctl"];
 
     let is_target_hwmon = |path: &PathBuf| {
-        fs::read_to_string(path.join("name"))
-            .ok()
-            .map_or(false, |name| TARGET_NAMES.contains(&name.trim()))
+        fs::read_to_string(path.join("name")).is_ok_and(|name| TARGET_NAMES.contains(&name.trim()))
     };
 
     let is_temp_label = |path: &PathBuf| {
         path.file_name()
             .and_then(|n| n.to_str())
-            .map_or(false, |s| s.contains("temp") && s.contains("label"))
+            .is_some_and(|s| s.contains("temp") && s.contains("label"))
     };
 
     let has_target_label = |path: &PathBuf| {
-        fs::read_to_string(path).ok().map_or(false, |content| {
+        fs::read_to_string(path).ok().is_some_and(|content| {
             let label = content.trim();
             TARGET_LABELS.iter().any(|&target| label.starts_with(target))
         })
@@ -224,14 +92,11 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
 
     fs::read_dir(HWMON_PATH)
         .expect("cannot read /sys/class/hwmon")
-        .filter_map(Result::ok)
+        .flatten()
         .map(|e| e.path())
         .filter(is_target_hwmon)
         .flat_map(|dir| {
-            fs::read_dir(&dir)
-                .expect("cannot read hwmon directory")
-                .filter_map(Result::ok)
-                .map(|e| e.path())
+            fs::read_dir(&dir).expect("cannot read a hwmon directory").flatten().map(|e| e.path())
         })
         .filter(|p| p.is_file() && is_temp_label(p) && has_target_label(p))
         .find_map(to_input_path)
@@ -241,7 +106,32 @@ static TEMPERATURE_PROVIDER_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
 static DISCRT_PERIOD_MS: LazyLock<AtomicI32> =
     LazyLock::new(|| AtomicI32::new(read_config().unwrap_or_default().min_period_ms as i32));
 
-static MQUEUE: LazyLock<posixmq::PosixMq> = LazyLock::new(|| get_mqueue());
+static MQUEUE: LazyLock<posixmq::PosixMq> = LazyLock::new(|| {
+    let mq = posixmq::OpenOptions::readwrite()
+        .mode(0o777)
+        .nonblocking()
+        .capacity(3)
+        .max_msg_len(256)
+        .create()
+        .open("/cpu-throttle")
+        .expect("Cannot open mqueue");
+
+    if is_superuser() {
+        fs::set_permissions(
+            "/dev/mqueue/cpu-throttle",
+            std::os::unix::fs::PermissionsExt::from_mode(0o777),
+        )
+        .expect("Cannot set permissions");
+    }
+
+    mq
+});
+
+static LOCK_FILE: LazyLock<File> = LazyLock::new(|| {
+    let lock_file = File::create("/run/cpu-throttle.lock").expect("cannot open lock file");
+    let _ = File::set_permissions(&lock_file, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+    lock_file
+});
 
 struct PDController {
     target_t: i32,
@@ -265,7 +155,7 @@ impl PDController {
         let smoothing_period = (4.0 * (ACCEL10_TIME_MS / config.min_period_ms as f64)).max(1.0);
         Self {
             target_t,
-            prev_t: get_temp(),
+            prev_t: 0,
             temp_velocity_err: 0.0,
             max_descent_velocity: config.max_descent_velocity,
             dynamic_multiplier_raw: 1.0,
@@ -333,13 +223,12 @@ impl UniformFrequencyLimiter {
         }
     }
 }
-read_i32
+
 impl FrequencyLimiter for UniformFrequencyLimiter {
     fn limit_freq(&mut self, freq: i32) {
         for file in self.freq_ctl_files.iter_mut() {
-            fs::File::seek(file, std::io::SeekFrom::Start(0))
-                .expect("cannot seek scaling_max_freq");
-            write!(file, "{}", freq).expect("cannot write scaling_max_freq");
+            File::seek(file, io::SeekFrom::Start(0)).expect("cannot seek scaling_max_freq");
+            file.write_all(freq.to_string().as_bytes()).expect("cannot write scaling_max_freq");
         }
     }
 }
@@ -387,7 +276,7 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
             .zip(self.cpu_idleness.iter_mut())
         {
             let curr_freq: i32 = {
-                fs::File::seek(check_file, std::io::SeekFrom::Start(0))
+                File::seek(check_file, io::SeekFrom::Start(0))
                     .expect("cannot seek scaling_cur_freq");
                 let mut content = String::new();
                 check_file.read_to_string(&mut content).expect("cannot read scaling_cur_freq");
@@ -401,20 +290,154 @@ impl FrequencyLimiter for MulticoreFrequencyLimiter {
                 *idleness = (*idleness).min(self.core_idleness_factor_ms);
             }
 
-            fs::File::seek(ctl_file, std::io::SeekFrom::Start(0))
-                .expect("cannot seek scaling_max_freq");
-            write!(
-                ctl_file,
-                "{}",
-                if *idleness >= self.core_idleness_factor_ms { *MAX_CPU_FREQ } else { freq }
-            )
-            .expect("cannot write scaling_max_freq");
+            File::seek(ctl_file, io::SeekFrom::Start(0)).expect("cannot seek scaling_max_freq");
+            let freq_to_wr =
+                if *idleness >= self.core_idleness_factor_ms { *MAX_CPU_FREQ } else { freq };
+            ctl_file
+                .write_all(freq_to_wr.to_string().as_bytes())
+                .expect("cannot write scaling_max_freq");
         }
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+struct JsonConfig {
+    min_freq: i32,
+    min_multiplier: u16,
+    max_multiplier: u16,
+    full_throttle_min_time_ms: i32,
+    max_descent_velocity: f64,
+    min_period_ms: u16,
+    max_period_ms: u16,
+    start_lag_time_ms: u16,
+    release_lag_time_ms: u16,
+    core_idleness_factor_ms: u16,
+    has_lag: bool,
+    multicore_limiter_allowed: bool,
+}
+
+impl Default for JsonConfig {
+    fn default() -> Self {
+        JsonConfig {
+            min_freq: *MIN_CPU_FREQ,
+            min_multiplier: 5,
+            max_multiplier: 150,
+            full_throttle_min_time_ms: 4000,
+            max_descent_velocity: 0.8,
+            min_period_ms: 150,
+            max_period_ms: 1500,
+            start_lag_time_ms: 7000,
+            release_lag_time_ms: 12000,
+            core_idleness_factor_ms: 1000,
+            has_lag: true,
+            multicore_limiter_allowed: true,
+        }
+    }
+}
+
+struct ThrottlingAlgo {
+    config: JsonConfig,
+    pd_ctl: PDController,
+    limiter: Box<dyn FrequencyLimiter>,
+    active: bool,
+    overall_restlessness: f64,
+    curr_freq: i32,
+    max_step_down: i32,
+}
+
+impl ThrottlingAlgo {
+    fn new(target_t: i32, config: JsonConfig) -> Self {
+        let pd = PDController::new(target_t, config);
+        let mut limiter: Box<dyn FrequencyLimiter> =
+            if config.multicore_limiter_allowed && CPU_PATHS.len() > 1 {
+                Box::new(MulticoreFrequencyLimiter::new(config.core_idleness_factor_ms))
+            } else {
+                Box::new(UniformFrequencyLimiter::new())
+            };
+
+        limiter.limit_freq(*MAX_CPU_FREQ);
+        Self {
+            config,
+            pd_ctl: pd,
+            limiter,
+            active: false,
+            overall_restlessness: 0.0,
+            curr_freq: *MAX_CPU_FREQ,
+            max_step_down: (*MAX_CPU_FREQ - *MIN_CPU_FREQ)
+                / (config.full_throttle_min_time_ms / config.min_period_ms as i32).max(1),
+        }
+    }
+
+    fn step(&mut self) -> i32 {
+        let actual_t = read_i32(&TEMPERATURE_PROVIDER_FILE);
+        let delta_freq = self.pd_ctl.get_delta_freq(actual_t);
+        let new_dscrt_period;
+
+        let warmup = delta_freq > 0 && actual_t > self.pd_ctl.target_t - 5000
+            || self.curr_freq != *MAX_CPU_FREQ;
+
+        if self.config.has_lag {
+            if warmup {
+                self.overall_restlessness +=
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.start_lag_time_ms as f64;
+                self.overall_restlessness = self.overall_restlessness.min(1.0);
+            } else if self.curr_freq == *MAX_CPU_FREQ {
+                self.overall_restlessness -=
+                    DISCRT_PERIOD_MS.load(Relaxed) as f64 / self.config.release_lag_time_ms as f64;
+                self.overall_restlessness = self.overall_restlessness.max(0.0);
+            }
+
+            if self.overall_restlessness == 1.0 {
+                self.active = true;
+            }
+            if self.overall_restlessness == 0.0 {
+                self.active = false;
+            }
+
+            if warmup {
+                new_dscrt_period = (self.config.min_period_ms as i32
+                    + ((self.config.max_period_ms - self.config.min_period_ms) as f64
+                        * (1.0 - self.overall_restlessness)) as i32)
+                    .min(DISCRT_PERIOD_MS.load(Relaxed));
+            } else {
+                new_dscrt_period = if self.overall_restlessness == 0.0 {
+                    self.config.max_period_ms as i32
+                } else {
+                    DISCRT_PERIOD_MS.load(Relaxed)
+                }
+            }
+        } else {
+            self.active = warmup;
+            if warmup {
+                new_dscrt_period = self.config.min_period_ms as i32;
+            } else {
+                new_dscrt_period = self.config.max_period_ms as i32;
+            }
+        }
+
+        if self.active {
+            self.curr_freq -= delta_freq.min(self.max_step_down);
+            self.curr_freq = self.curr_freq.clamp(self.config.min_freq, *MAX_CPU_FREQ);
+            self.limiter.limit_freq(self.curr_freq);
+        }
+
+        new_dscrt_period
+    }
+
+    fn force_unlock_freq(&mut self) {
+        self.limiter.limit_freq(*MAX_CPU_FREQ);
+        self.curr_freq = *MAX_CPU_FREQ;
+        self.overall_restlessness = 0.0;
+    }
+
+    fn set_target(&mut self, target_t: i32) {
+        self.pd_ctl.target_t = target_t;
+    }
+}
+
 #[derive(Serialize, Deserialize, Subcommand, PartialEq, Clone)]
-enum InterThreadMessage {
+enum ControlCommand {
     /// Pause throttling
     Pause,
     /// Continue throttling
@@ -442,117 +465,110 @@ struct SwitchConfigArg {
 }
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(version, about)]
 struct Args {
     #[command(subcommand)]
-    command: InterThreadMessage,
+    command: ControlCommand,
 }
 
-fn main() -> Result<(), i32> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
-    let target_temperature: i32 = if already_run() {
-        send_msg(args.command);
-
+    if already_run() {
+        send_msg(args.command).context("Cannot send message to daemon")?;
         return Ok(());
-    } else {
-        use InterThreadMessage::*;
-        match args.command {
-            At(arg) => arg.temperature,
-            _ => {
-                eprintln!(
-                    "Daemon has not been started. Start it with \'cpu-throttle at <temperature>\'"
-                );
-                return Err(1);
-            }
+    }
+
+    let target_temperature: i32;
+    match args.command {
+        ControlCommand::At(arg) => target_temperature = arg.temperature,
+        ControlCommand::SwitchConfig(sw_arg) => {
+            switch_config(sw_arg.config_name)
+                .context("Cannot switch config, try start the daemon first")?;
+            return Ok(());
         }
-    };
+        ControlCommand::Exit => return Ok(()),
+        _ => {
+            bail!("Daemon has not been started. Start it with \'cpu-throttle at <temperature>\'");
+        }
+    }
 
     if !is_superuser() {
-        eprintln!("Run with sudo!");
-        return Err(1);
+        bail!("Run with sudo!");
     }
 
-    let mut target_t = target_temperature * 1000;
+    if !Path::new("/etc/cpu-throttle/profiles/default.json").exists() {
+        fs::create_dir_all("/etc/cpu-throttle/profiles").context("create_dir_all at main")?;
+        File::create("/etc/cpu-throttle/profiles/default.json")
+            .context("default config creation at main")?;
 
-    if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/default.json")).exists() {
-        std::process::Command::new("mkdir")
-            .arg("-p")
-            .arg(CONFIG_DIR.to_owned() + "/profiles")
-            .status()
-            .expect("cannot create config paths");
-
-        std::fs::File::create(CONFIG_DIR.to_owned() + "/profiles/default.json")
-            .expect("Cannot create config.json");
-        std::fs::set_permissions(
-            CONFIG_DIR.to_owned() + "/profiles/default.json",
-            Permissions::from_mode(0o644),
+        fs::set_permissions(
+            "/etc/cpu-throttle/profiles/default.json",
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
-        .expect("Cannot set permissions on config.json");
+        .context("setting permissions at main")?;
 
-        if !Path::new(&(CONFIG_DIR.to_owned() + "/config.json")).exists() {
-            std::process::Command::new("ln")
-                .arg("-s")
-                .arg("profiles/default.json")
-                .arg(CONFIG_DIR.to_owned() + "/config.json")
-                .status()
-                .unwrap();
+        if !Path::new("/etc/cpu-throttle/config.json").exists() {
+            std::os::unix::fs::symlink("profiles/default.json", "/etc/cpu-throttle/config.json")
+                .context("symlink creation at main")?;
         }
+
+        let default_config = JsonConfig::default();
+        write_config(&default_config).context("writing default config at main")?;
     }
 
-    let mut config = match read_config() {
-        Ok(config) => config,
-        Err(_) => {
-            let default_config = JsonConfig::default();
-            write_config(default_config).unwrap();
-            default_config
-        }
-    };
+    let mut config = read_config().context("reading config at main")?;
 
     let throttling = Arc::new(AtomicBool::new(true));
-    let t_wait_term = throttling.clone();
+    let t_wait_term = Arc::clone(&throttling);
 
     ctrlc::set_handler(move || {
         t_wait_term.store(false, Release);
     })
-    .expect("Error setting SIGTERM handler");
+    .context("Cannot set ctrl+c handler")?;
 
+    let mut target_t = target_temperature * 1000;
     let mut algo = ThrottlingAlgo::new(target_t, config);
 
     let mut paused = false;
 
     while throttling.load(Acquire) {
-        std::thread::sleep(Duration::from_millis(DISCRT_PERIOD_MS.load(Relaxed) as u64));
+        thread::sleep(Duration::from_millis(DISCRT_PERIOD_MS.load(Relaxed) as u64));
 
-        use InterThreadMessage::*;
         let msg = receive_msg();
-        if let Some(msg) = msg {
+        if let Ok(msg) = msg {
             match msg {
-                Pause | Continue | Toggle => {
-                    if paused && (msg == Toggle || msg == Continue) {
-                        paused = false;
-                    } else if !paused && (msg == Toggle || msg == Pause) {
-                        algo.limiter.limit_freq(*MAX_CPU_FREQ);
-                        algo.curr_freq = *MAX_CPU_FREQ;
-                        algo.overall_restlessness = 0.0;
-                        DISCRT_PERIOD_MS.store(config.max_period_ms as i32, Ordering::Relaxed);
-                        paused = true;
+                ControlCommand::Pause | ControlCommand::Continue | ControlCommand::Toggle => {
+                    let paused_n = match msg {
+                        ControlCommand::Toggle => !paused,
+                        ControlCommand::Continue => false,
+                        ControlCommand::Pause => true,
+                        _ => panic!("impossible"),
+                    };
+
+                    if !paused && paused_n {
+                        algo.force_unlock_freq();
+                        DISCRT_PERIOD_MS.store(config.max_period_ms as i32, Relaxed);
                     }
+                    paused = paused_n;
                 }
-                ReadConfig => {
-                    config = read_config().unwrap();
+                ControlCommand::ReadConfig => {
+                    config =
+                        read_config().context("caught read_config: cannot read second time")?;
                     algo = ThrottlingAlgo::new(target_t, config);
                 }
-                At(temp_arg) => {
+                ControlCommand::At(temp_arg) => {
                     target_t = temp_arg.temperature * 1000;
-                    algo.pd_ctl.target_t = target_t;
+                    algo.set_target(target_t);
                 }
-                SwitchConfig(sw_arg) => {
-                    switch_config(sw_arg.config_name).unwrap();
-                    config = read_config().unwrap();
+                ControlCommand::SwitchConfig(sw_arg) => {
+                    switch_config(sw_arg.config_name)
+                        .context("caught switch_config: cannot switch config")?;
+                    config = read_config()
+                        .context("caught switch_config: cannot read config via config.json")?;
                     algo = ThrottlingAlgo::new(target_t, config);
                 }
-                Exit => {
+                ControlCommand::Exit => {
                     break;
                 }
             }
@@ -564,123 +580,87 @@ fn main() -> Result<(), i32> {
 
         let new_dscrt_period = algo.step();
 
-        DISCRT_PERIOD_MS.store(new_dscrt_period, Ordering::Relaxed);
+        DISCRT_PERIOD_MS.store(new_dscrt_period, Relaxed);
     }
 
     println!("exiting...");
 
-    posixmq::remove_queue("/cpu-throttle").expect("Cannot close message queue");
+    algo.force_unlock_freq();
+
+    posixmq::remove_queue("/cpu-throttle").context("cannot remove posixmq queue at main")?;
     Ok(())
 }
 
-fn get_mqueue() -> posixmq::PosixMq {
-    let mq = posixmq::OpenOptions::readwrite()
-        .mode(0o777)
-        .nonblocking()
-        .capacity(3)
-        .max_msg_len(256)
-        .create()
-        .open("/cpu-throttle")
-        .unwrap();
-
-    if is_superuser() {
-        std::fs::set_permissions("/dev/mqueue/cpu-throttle", Permissions::from_mode(0o777))
-            .expect("Cannot set permissions");
-    }
-    mq
+fn send_msg(msg: ControlCommand) -> Result<()> {
+    MQUEUE.send(0, serde_json::to_string(&msg)?.as_bytes())?;
+    Ok(())
 }
 
-fn send_msg(msg: InterThreadMessage) {
-    MQUEUE.send(0, serde_json::to_string(&msg).unwrap().as_bytes()).expect("Cannot send message");
-}
-
-fn receive_msg() -> Option<InterThreadMessage> {
+fn receive_msg() -> Result<ControlCommand> {
     if MQUEUE.attributes().unwrap().current_messages == 0 {
-        None
+        bail!("No messages")
     } else {
         let mut msg_buffer = [0_u8; 256];
-        MQUEUE.recv(&mut msg_buffer).unwrap();
-        Some(
-            serde_json::from_str::<InterThreadMessage>(
-                from_utf8(&msg_buffer).unwrap().trim_end_matches('\0'),
-            )
-            .unwrap(),
+        MQUEUE.recv(&mut msg_buffer)?;
+        Ok(serde_json::from_str::<ControlCommand>(
+            from_utf8(&msg_buffer)
+                .context("invalid utf8 in mqueue message")?
+                .trim_end_matches('\0'),
         )
+        .context("invalid json in mqueue message")?)
     }
 }
 
-fn get_temp() -> i32 {
-    read_i32(&TEMPERATURE_PROVIDER_FILE)
-}
-
-fn read_i32(path: &PathBuf) -> i32 {
+fn read_i32(path: &Path) -> i32 {
     let mut attempts = 0;
     let mut interval = 250;
     let data = loop {
-        match std::fs::read_to_string(path) {
+        match fs::read_to_string(path) {
             Ok(data) => break data,
             Err(_) => {
                 attempts += 1;
                 if attempts == 4 {
-                    eprintln!("lost access to {}", path.to_str().unwrap());
-                    std::process::exit(1);
+                    eprintln!("lost access to {}", path.display());
+                    process::exit(1);
                 }
-                std::thread::sleep(Duration::from_millis(interval));
+                thread::sleep(Duration::from_millis(interval));
                 interval *= 2;
                 continue;
             }
         }
     };
     let trimmed = data.trim();
-    let value = trimmed.parse().expect("cannot parse file content as i32");
-    value
+    trimmed.parse().expect("cannot parse file content as i32")
 }
 
-fn write_i32(path: &PathBuf, value: i32) {
-    let mut attempts = 0;
-    let mut interval = 250;
-    loop {
-        match std::fs::write(path, value.to_string()) {
-            Ok(()) => break,
-            Err(_) => {
-                attempts += 1;
-                if attempts == 4 {
-                    eprintln!("lost access to {}", path.to_str().unwrap());
-                    std::process::exit(1);
-                }
-                std::thread::sleep(Duration::from_millis(interval));
-                interval *= 2;
-                continue;
-            }
-        }
-    }
-}
-
-fn switch_config(name: String) -> Result<(), ()> {
-    if !Path::new(&(CONFIG_DIR.to_owned() + "/profiles/" + &name + ".json")).exists()
-        || !is_superuser()
+fn switch_config(name: String) -> Result<()> {
+    if !Path::new(&format!("/etc/cpu-throttle/profiles/{}.json", name)).exists() || !is_superuser()
     {
-        return Err(());
+        bail!("Need sudo!");
     }
-    std::process::Command::new("ln")
-        .arg("-sf")
-        .arg(String::from("profiles/") + &name + ".json")
-        .arg(CONFIG_DIR.to_owned() + "/config.json")
-        .status()
-        .unwrap();
+    fs::remove_file("/etc/cpu-throttle/config.json")
+        .context("cannot remove config.json link in switch_config")?;
+    std::os::unix::fs::symlink(format!("profiles/{}.json", name), "/etc/cpu-throttle/config.json")
+        .context("cannot create config.json link in switch_config")?;
     Ok(())
 }
 
-fn read_config() -> Result<JsonConfig, Box<dyn std::error::Error>> {
-    let bytes_json = std::fs::read(CONFIG_DIR.to_owned() + "/config.json")?;
-    let json = serde_json::from_str::<JsonConfig>(from_utf8(&bytes_json)?)?;
+fn read_config() -> Result<JsonConfig> {
+    let json_string = fs::read_to_string("/etc/cpu-throttle/config.json")
+        .context("cannot read config via config.json link")?;
+    let json = serde_json::from_str::<JsonConfig>(&json_string)
+        .context("invalid json at config.json link")?;
     Ok(json)
 }
 
-fn write_config(config: JsonConfig) -> Result<(), std::io::Error> {
-    let mut config_file =
-        std::fs::OpenOptions::new().write(true).open(CONFIG_DIR.to_owned() + "/config.json")?;
-    config_file.write(serde_json::to_string_pretty(&config).unwrap().as_bytes())?;
+fn write_config(config: &JsonConfig) -> Result<()> {
+    let mut config_file = fs::OpenOptions::new()
+        .write(true)
+        .open("/etc/cpu-throttle/config.json")
+        .context("cannot open config.json with write permissions")?;
+    config_file
+        .write_all(serde_json::to_string_pretty(config).expect("not possible?").as_bytes())
+        .context("cannot write config in opened file")?;
     Ok(())
 }
 
@@ -689,18 +669,5 @@ fn is_superuser() -> bool {
 }
 
 fn already_run() -> bool {
-    let mut pgrep = Command::new("pgrep");
-    pgrep.arg("cpu-throttle");
-    let output = pgrep
-        .output()
-        .inspect_err(|_| {
-            eprintln!("Fatal: pgrep (procps) not installed");
-            std::process::exit(1);
-        })
-        .unwrap()
-        .stdout;
-    let output_str = from_utf8(&output).unwrap();
-    let lines: Vec<&str> = output_str.split('\n').collect();
-
-    lines.len() > 2
+    File::try_lock(&LOCK_FILE).is_err()
 }
